@@ -1,11 +1,48 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import './App.css'
+
+type Photo = {
+  id: number
+  name: string
+  url: string
+}
 
 function App() {
   const [darkMode, setDarkMode] = useState(true)
+  const [photos, setPhotos] = useState<Photo[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleAddPhotos = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFilesSelected = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = Array.from(event.target.files ?? [])
+
+    const newPhotos = files.map((file) => ({
+      id: Date.now() + Math.random(),
+      name: file.name,
+      url: URL.createObjectURL(file),
+    }))
+
+    setPhotos((currentPhotos) => [...currentPhotos, ...newPhotos])
+
+    event.target.value = ''
+  }
 
   return (
     <div className={`app ${darkMode ? 'dark' : 'light'}`}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        multiple
+        hidden
+        onChange={handleFilesSelected}
+      />
+
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">P</div>
@@ -42,20 +79,35 @@ function App() {
           <div className="panel-header">
             <div>
               <div className="panel-title">Photos</div>
-              <div className="panel-subtitle">0 photos</div>
+              <div className="panel-subtitle">
+                {photos.length} {photos.length === 1 ? 'photo' : 'photos'}
+              </div>
             </div>
 
-            <button className="add-button">+ Add</button>
+            <button className="add-button" onClick={handleAddPhotos}>
+              + Add
+            </button>
           </div>
 
           <div className="photo-list">
-            <div className="empty-state">
-              <div className="empty-icon">＋</div>
-              <div className="empty-title">No photos yet</div>
-              <div className="empty-text">
-                Add photos to start creating your Polaroid.
+            {photos.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">＋</div>
+                <div className="empty-title">No photos yet</div>
+                <div className="empty-text">
+                  Add photos to start creating your Polaroid.
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="photo-grid">
+                {photos.map((photo) => (
+                  <div className="photo-card" key={photo.id}>
+                    <img src={photo.url} alt={photo.name} />
+                    <div className="photo-name">{photo.name}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </aside>
 
