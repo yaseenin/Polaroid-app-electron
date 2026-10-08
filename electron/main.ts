@@ -28,9 +28,13 @@ type RustProcessRequest = {
   outputDir?: string
   settings?: {
     exposure?: number
+    brightness?: number
     contrast?: number
     gamma?: number
+    saturation?: number
     sharpen?: number
+    temperature?: number
+    vignette?: number
     autoRotate?: boolean
     format?: 'jpeg' | 'jpg' | 'pdf'
     dpi?: number
@@ -40,6 +44,7 @@ type RustProcessRequest = {
 type RustProcessResponse = {
   ok: boolean
   outputDir?: string
+  files?: string[]
   message?: string
   error?: string
 }
@@ -49,12 +54,23 @@ function ensureRustEngineReady(): string {
     return RUST_BINARY_PATH
   }
 
-  const result = spawnSync('cargo', ['build', '--manifest-path', RUST_MANIFEST_PATH, '--color', 'never'], {
+  const cargoName = process.platform === 'win32' ? 'cargo.exe' : 'cargo'
+  const cargoHome = process.env.CARGO_HOME ?? path.join(os.homedir(), '.cargo')
+  const cargoPath = [
+    path.join(cargoHome, 'bin', cargoName),
+    ...(process.platform === 'darwin' ? ['/opt/homebrew/bin/cargo', '/usr/local/bin/cargo'] : []),
+  ].find((candidate) => fs.existsSync(candidate)) ?? cargoName
+
+  const result = spawnSync(cargoPath, ['build', '--manifest-path', RUST_MANIFEST_PATH, '--color', 'never'], {
     cwd: process.env.APP_ROOT,
     env: process.env,
     encoding: 'utf8',
-    shell: true,
   })
+
+  const spawnError = result.error as NodeJS.ErrnoException | undefined
+  if (spawnError?.code === 'ENOENT') {
+    throw new Error('Rust and Cargo are not installed or are unavailable. Install Rust from https://rustup.rs, restart the app, and try again.')
+  }
 
   if (result.status !== 0) {
     const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
@@ -94,7 +110,55 @@ ipcMain.handle('open-image-dialog', async () => {
   }
 })
 
-ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf' }) => {
+ipcMain.handle('open-project', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: 'Open Polaroid project',
+    properties: ['openFile'],
+    filters: [{ name: 'Polaroid Project', extensions: ['polaroid', 'json'] }],
+  })
+
+  if (canceled || !filePaths[0]) {
+    return { canceled: true }
+  }
+
+  try {
+    const project = JSON.parse(await fs.promises.readFile(filePaths[0], 'utf8')) as {
+      photos?: Array<{ name?: string; path?: string; cropApplied?: unknown }>
+    }
+    if (!Array.isArray(project.photos)) {
+      throw new Error('This file does not contain a valid Polaroid project.')
+    }
+
+    const photos = project.photos.map((photo) => {
+      if (!photo.path || !fs.existsSync(photo.path)) {
+        throw new Error(`Project photo is missing: ${photo.path ?? photo.name ?? 'unknown image'}`)
+      }
+      return { ...photo, path: photo.path, dataUrl: fileToDataUrl(photo.path) }
+    })
+
+    return { canceled: false, project: { ...project, photos } }
+  } catch (error) {
+    return { canceled: false, error: error instanceof Error ? error.message : 'Unable to open project.' }
+  }
+})
+
+ipcMain.handle('save-project', async (_event, project: unknown) => {
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: 'Save Polaroid project',
+    defaultPath: 'Polaroid Project.polaroid',
+    filters: [{ name: 'Polaroid Project', extensions: ['polaroid'] }],
+  })
+
+  if (canceled || !filePath) {
+    return { ok: false, canceled: true }
+  }
+
+  const normalizedPath = filePath.toLowerCase().endsWith('.polaroid') ? filePath : `${filePath}.polaroid`
+  await fs.promises.writeFile(normalizedPath, JSON.stringify(project, null, 2), 'utf8')
+  return { ok: true, filePath: normalizedPath }
+})
+
+ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => {
   const format = payload.format ?? 'png'
   const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : 'png'
   const defaultName = payload.defaultName.endsWith(`.${extension}`) ? payload.defaultName : `${payload.defaultName.replace(/\.[^.]+$/, '') || 'export'}.${extension}`
@@ -118,7 +182,8 @@ ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; default
     const imageBytes = Buffer.from(base64, 'base64')
     const pdfDoc = await PDFDocument.create()
     const image = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes)
-    const page = pdfDoc.addPage([image.width, image.height])
+    const pointsPerPixel = 72 / Math.max(1, payload.dpi ?? 300)
+    const page = pdfDoc.addPage([image.width * pointsPerPixel, image.height * pointsPerPixel])
     const scale = Math.min(page.getWidth() / image.width, page.getHeight() / image.height)
     const width = image.width * scale
     const height = image.height * scale
@@ -149,7 +214,7 @@ ipcMain.handle('rust:process', async (_event, request: RustProcessRequest): Prom
     }
 
     const binaryPath = ensureRustEngineReady()
-    const outputDir = request.outputDir ?? path.join(os.tmpdir(), 'polaroid_print_imposition_engine')
+    const outputDir = request.outputDir ?? path.join(os.tmpdir(), 'polaroid_print_imposition_engine', `export_${Date.now()}`)
     const settings = request.settings ?? {}
     const args = ['--process', '--output-dir', outputDir]
 
@@ -160,14 +225,26 @@ ipcMain.handle('rust:process', async (_event, request: RustProcessRequest): Prom
     if (typeof settings.exposure === 'number') {
       args.push('--exposure', settings.exposure.toString())
     }
+    if (typeof settings.brightness === 'number') {
+      args.push('--brightness', settings.brightness.toString())
+    }
     if (typeof settings.contrast === 'number') {
       args.push('--contrast', settings.contrast.toString())
     }
     if (typeof settings.gamma === 'number') {
       args.push('--gamma', settings.gamma.toString())
     }
+    if (typeof settings.saturation === 'number') {
+      args.push('--saturation', settings.saturation.toString())
+    }
     if (typeof settings.sharpen === 'number') {
       args.push('--sharpen', settings.sharpen.toString())
+    }
+    if (typeof settings.temperature === 'number') {
+      args.push('--temperature', settings.temperature.toString())
+    }
+    if (typeof settings.vignette === 'number') {
+      args.push('--vignette', settings.vignette.toString())
     }
     if (typeof settings.autoRotate === 'boolean') {
       args.push('--auto-rotate', settings.autoRotate ? 'true' : 'false')
@@ -205,9 +282,18 @@ ipcMain.handle('rust:process', async (_event, request: RustProcessRequest): Prom
     }
 
     const normalized = stdout.trim() || outputDir
+    const outputFiles = (await fs.promises.readdir(outputDir))
+      .filter((file) => /\.jpe?g$/i.test(file))
+      .sort((left, right) => {
+        const leftIndex = Number(left.match(/_(\d+)\.jpe?g$/i)?.[1] ?? 0)
+        const rightIndex = Number(right.match(/_(\d+)\.jpe?g$/i)?.[1] ?? 0)
+        return leftIndex - rightIndex
+      })
+      .map((file) => path.join(outputDir, file))
     return {
       ok: true,
       outputDir: normalized,
+      files: outputFiles,
       message: `Rust processing completed: ${normalized}`,
     }
   } catch (error) {

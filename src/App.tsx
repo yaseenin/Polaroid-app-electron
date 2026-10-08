@@ -25,6 +25,28 @@ type NativeImagePickerResult = {
   dataUrls?: string[]
 }
 
+type CropApplied = { x: number; y: number; width: number; height: number; rotation: number }
+type CropRect = { x: number; y: number; width: number; height: number }
+type EditorSnapshot = {
+  settings: AdjustmentSettings
+  cropAppliedByPhoto: Record<number, CropApplied | null>
+  cropRotation: number
+}
+type SavedProject = {
+  version: 1
+  photos: Array<{ name: string; path: string; cropApplied: CropApplied | null; dataUrl?: string }>
+  settings: AdjustmentSettings
+  preset: PresetKey
+  paperSize: PaperSizeKey
+  selectedPhotoIndex: number
+  exportFormat: 'png' | 'jpeg' | 'pdf'
+  exportPageCount: number
+  exportOrientation: 'portrait' | 'landscape'
+  exportAutoRotate: boolean
+  exportBlurBackground: boolean
+  exportBlurStrength: number
+}
+
 type SliderProps = {
   label: string
   value: number
@@ -32,9 +54,10 @@ type SliderProps = {
   max: number
   step: number
   onChange: (value: number) => void
+  onInteractionStart?: () => void
 }
 
-function SliderControl({ label, value, min, max, step, onChange }: SliderProps) {
+function SliderControl({ label, value, min, max, step, onChange, onInteractionStart }: SliderProps) {
   return (
     <div className="slider-row">
       <div className="slider-label-row">
@@ -48,6 +71,12 @@ function SliderControl({ label, value, min, max, step, onChange }: SliderProps) 
         max={max}
         step={step}
         value={value}
+        onPointerDown={onInteractionStart}
+        onKeyDown={(event) => {
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+            onInteractionStart?.()
+          }
+        }}
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </div>
@@ -66,27 +95,43 @@ function App() {
   const [exportBlurBackground, setExportBlurBackground] = useState(true)
   const [exportBlurStrength, setExportBlurStrength] = useState(14)
   const [settings, setSettings] = useState<AdjustmentSettings>(defaultSettings)
-  const [status, setStatus] = useState('Ready for processing')
+  const [showOriginalPreview, setShowOriginalPreview] = useState(false)
+  const [status, setStatus] = useState('No photos added yet')
   const [processing, setProcessing] = useState(false)
   const [lastOutputDir, setLastOutputDir] = useState<string | null>(null)
+  const [undoStack, setUndoStack] = useState<EditorSnapshot[]>([])
+  const [redoStack, setRedoStack] = useState<EditorSnapshot[]>([])
+  const [zoom, setZoom] = useState(1)
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
+  const [isPanning, setIsPanning] = useState(false)
   type CropHandle = 'nw' | 'ne' | 'sw' | 'se'
 
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [cropMode, setCropMode] = useState(false)
   const [cropAspect, setCropAspect] = useState<'Free' | 'Square' | 'Mini' | 'Wide'>('Free')
   const [cropRotation, setCropRotation] = useState(0)
-  const [cropRect, setCropRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
-  const [cropApplied, setCropApplied] = useState<{ x: number; y: number; width: number; height: number; rotation: number } | null>(null)
-  const [cropRectByPhoto, setCropRectByPhoto] = useState<Record<number, { x: number; y: number; width: number; height: number } | null>>({})
-  const [cropAppliedByPhoto, setCropAppliedByPhoto] = useState<Record<number, { x: number; y: number; width: number; height: number; rotation: number } | null>>({})
+  const [cropRect, setCropRect] = useState<CropRect | null>(null)
+  const [cropApplied, setCropApplied] = useState<CropApplied | null>(null)
+  const [cropRectByPhoto, setCropRectByPhoto] = useState<Record<number, CropRect | null>>({})
+  const [cropAppliedByPhoto, setCropAppliedByPhoto] = useState<Record<number, CropApplied | null>>({})
   const [cropCursor, setCropCursor] = useState<'crosshair' | 'move' | 'nwse-resize' | 'nesw-resize'>('crosshair')
   const [histogram, setHistogram] = useState<number[]>(new Array(32).fill(0))
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const canvasPanelRef = useRef<HTMLDivElement>(null)
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const exportPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const processedPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const cropStartRef = useRef<{ x: number; y: number } | null>(null)
   const cropDragRef = useRef<{ mode: 'new' | 'move' | 'resize'; handle?: CropHandle; startX: number; startY: number; startRect: { x: number; y: number; width: number; height: number } } | null>(null)
+  const lastPointerPositionRef = useRef({ x: 0, y: 0 })
+  const panDragRef = useRef<{ pointerId: number; clientX: number; clientY: number; offsetX: number; offsetY: number } | null>(null)
+
+  const captureSnapshot = (): EditorSnapshot => ({ settings, cropAppliedByPhoto, cropRotation })
+
+  const recordHistory = () => {
+    setUndoStack((current) => [...current.slice(-49), captureSnapshot()])
+    setRedoStack([])
+  }
 
   const updateSetting = <K extends keyof AdjustmentSettings>(key: K, value: AdjustmentSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }))
@@ -209,6 +254,127 @@ function App() {
 
   const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
 
+  const handleUndo = () => {
+    const previous = undoStack[undoStack.length - 1]
+    if (!previous) return
+    setUndoStack((current) => current.slice(0, -1))
+    setRedoStack((current) => [...current, captureSnapshot()])
+    setSettings(previous.settings)
+    setCropAppliedByPhoto(previous.cropAppliedByPhoto)
+    setCropRotation(previous.cropRotation)
+    setCropRect(null)
+    setCropMode(false)
+    setStatus('Change undone')
+  }
+
+  const handleRedo = () => {
+    const next = redoStack[redoStack.length - 1]
+    if (!next) return
+    setRedoStack((current) => current.slice(0, -1))
+    setUndoStack((current) => [...current, captureSnapshot()])
+    setSettings(next.settings)
+    setCropAppliedByPhoto(next.cropAppliedByPhoto)
+    setCropRotation(next.cropRotation)
+    setCropRect(null)
+    setCropMode(false)
+    setStatus('Change redone')
+  }
+
+  const adjustZoom = (factor: number) => {
+    const nextZoom = Math.min(3, Math.max(0.25, Number((zoom * factor).toFixed(2))))
+    if (nextZoom === zoom) return
+
+    const ratio = nextZoom / zoom
+    const anchor = lastPointerPositionRef.current
+    setPanOffset((current) => ({
+      x: anchor.x - ratio * (anchor.x - current.x),
+      y: anchor.y - ratio * (anchor.y - current.y),
+    }))
+    setZoom(nextZoom)
+  }
+
+  const fitPreview = () => {
+    setZoom(1)
+    setPanOffset({ x: 0, y: 0 })
+  }
+
+  useEffect(() => {
+    const canvasPanel = canvasPanelRef.current
+    if (!canvasPanel) return
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const factor = event.deltaY < 0 ? 1.1 : 0.9
+      const nextZoom = Math.min(3, Math.max(0.25, Number((zoom * factor).toFixed(2))))
+      if (nextZoom === zoom) return
+
+      const bounds = canvasPanel.getBoundingClientRect()
+      const anchor = {
+        x: event.clientX - (bounds.left + bounds.width / 2),
+        y: event.clientY - (bounds.top + bounds.height / 2),
+      }
+      lastPointerPositionRef.current = anchor
+      const ratio = nextZoom / zoom
+      setPanOffset((current) => ({
+        x: anchor.x - ratio * (anchor.x - current.x),
+        y: anchor.y - ratio * (anchor.y - current.y),
+      }))
+      setZoom(nextZoom)
+    }
+
+    canvasPanel.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvasPanel.removeEventListener('wheel', handleWheel)
+  }, [zoom])
+
+  useEffect(() => {
+    setZoom(1)
+    setPanOffset({ x: 0, y: 0 })
+  }, [activePhoto?.id])
+
+  const handlePanPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (cropMode || zoom <= 1 || event.button !== 0) return
+
+    event.preventDefault()
+    const bounds = event.currentTarget.getBoundingClientRect()
+    lastPointerPositionRef.current = {
+      x: event.clientX - (bounds.left + bounds.width / 2),
+      y: event.clientY - (bounds.top + bounds.height / 2),
+    }
+    panDragRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      offsetX: panOffset.x,
+      offsetY: panOffset.y,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsPanning(true)
+  }
+
+  const handlePanPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    lastPointerPositionRef.current = {
+      x: event.clientX - (bounds.left + bounds.width / 2),
+      y: event.clientY - (bounds.top + bounds.height / 2),
+    }
+
+    const drag = panDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    setPanOffset({
+      x: drag.offsetX + event.clientX - drag.clientX,
+      y: drag.offsetY + event.clientY - drag.clientY,
+    })
+  }
+
+  const handlePanPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panDragRef.current?.pointerId !== event.pointerId) return
+    panDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    setIsPanning(false)
+  }
+
   const syncSelectedCropState = (nextRect: { x: number; y: number; width: number; height: number } | null, nextApplied: { x: number; y: number; width: number; height: number; rotation: number } | null) => {
     if (!activePhoto) {
       setCropRect(nextRect)
@@ -309,6 +475,98 @@ function App() {
     setStatus(`${nextPhotos.length} photo(s) loaded from the native dialog`)
   }
 
+  const handleSaveProject = async () => {
+    if (!window.polaroidEngine?.saveProject) {
+      setStatus('Project saving is available in the desktop app.')
+      return
+    }
+
+    const project: SavedProject = {
+      version: 1,
+      photos: photos.map((photo) => ({
+        name: photo.name,
+        path: photo.path,
+        cropApplied: cropAppliedByPhoto[photo.id] ?? null,
+      })),
+      settings,
+      preset,
+      paperSize,
+      selectedPhotoIndex,
+      exportFormat,
+      exportPageCount,
+      exportOrientation,
+      exportAutoRotate,
+      exportBlurBackground,
+      exportBlurStrength,
+    }
+
+    try {
+      const result = await window.polaroidEngine.saveProject(project)
+      if (result.canceled) return
+      if (!result.ok) throw new Error('Unable to save the project file.')
+      setLastOutputDir(result.filePath ?? null)
+      setStatus(`Project saved to ${result.filePath ?? 'file'}`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to save the project.')
+    }
+  }
+
+  const handleOpenProject = async () => {
+    if (!window.polaroidEngine?.openProject) {
+      setStatus('Project opening is available in the desktop app.')
+      return
+    }
+
+    try {
+      const result = await window.polaroidEngine.openProject()
+      if (result.canceled) return
+      if (result.error || !result.project) throw new Error(result.error ?? 'Unable to read the project file.')
+      const project = result.project as unknown as SavedProject
+      if (project.version !== 1 || !Array.isArray(project.photos)) {
+        throw new Error('This file is not a supported Polaroid project.')
+      }
+
+      const restoredPhotos = project.photos.map((photo, index) => {
+        if (!photo.path || !photo.dataUrl) {
+          throw new Error(`The project is missing image data for ${photo.name || `photo ${index + 1}`}.`)
+        }
+        return {
+          id: Date.now() + Math.random() + index,
+          name: photo.name,
+          path: photo.path,
+          url: photo.dataUrl,
+        }
+      })
+      const restoredCrops: Record<number, CropApplied | null> = {}
+      restoredPhotos.forEach((photo, index) => {
+        restoredCrops[photo.id] = project.photos[index].cropApplied ?? null
+      })
+
+      setPhotos(restoredPhotos)
+      setSettings(project.settings ?? defaultSettings)
+      setPreset(project.preset ?? 'mini')
+      setPaperSize(project.paperSize ?? 'A4')
+      setSelectedPhotoIndex(Math.min(project.selectedPhotoIndex ?? 0, Math.max(0, restoredPhotos.length - 1)))
+      setExportFormat(project.exportFormat ?? 'png')
+      setExportPageCount(project.exportPageCount ?? 1)
+      setExportOrientation(project.exportOrientation ?? 'portrait')
+      setExportAutoRotate(project.exportAutoRotate ?? true)
+      setExportBlurBackground(project.exportBlurBackground ?? true)
+      setExportBlurStrength(project.exportBlurStrength ?? 14)
+      setCropAppliedByPhoto(restoredCrops)
+      setCropRectByPhoto({})
+      setCropRect(null)
+      setCropMode(false)
+      setCropRotation(0)
+      setUndoStack([])
+      setRedoStack([])
+      setLastOutputDir(null)
+      setStatus(`Opened project with ${restoredPhotos.length} photo(s)`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to open the project.')
+    }
+  }
+
   useEffect(() => {
     if (!photos.length) {
       setSelectedPhotoIndex(0)
@@ -327,6 +585,77 @@ function App() {
       image.onerror = () => reject(new Error(`Unable to load image: ${src}`))
       image.src = src
     })
+
+  const handleAutoCorrect = async () => {
+    if (!activePhoto) return
+
+    const photo = activePhoto
+    setStatus(`Analyzing ${photo.name} for print correction…`)
+    try {
+      const image = await loadImageResource(photo.url)
+      const sample = document.createElement('canvas')
+      sample.width = Math.min(128, image.naturalWidth)
+      sample.height = Math.max(1, Math.round(image.naturalHeight * (sample.width / image.naturalWidth)))
+      const context = sample.getContext('2d')
+      if (!context) throw new Error('Unable to analyze the selected image.')
+      context.drawImage(image, 0, 0, sample.width, sample.height)
+
+      const pixels = context.getImageData(0, 0, sample.width, sample.height).data
+      const luminanceHistogram = new Uint32Array(256)
+      let redTotal = 0
+      let greenTotal = 0
+      let blueTotal = 0
+      let chromaTotal = 0
+      const pixelCount = pixels.length / 4
+
+      for (let index = 0; index < pixels.length; index += 4) {
+        const red = pixels[index] / 255
+        const green = pixels[index + 1] / 255
+        const blue = pixels[index + 2] / 255
+        const luminance = Math.round((red * 0.299 + green * 0.587 + blue * 0.114) * 255)
+        luminanceHistogram[luminance] += 1
+        redTotal += red
+        greenTotal += green
+        blueTotal += blue
+        chromaTotal += Math.max(red, green, blue) - Math.min(red, green, blue)
+      }
+
+      const percentile = (fraction: number) => {
+        const target = pixelCount * fraction
+        let total = 0
+        for (let value = 0; value < luminanceHistogram.length; value += 1) {
+          total += luminanceHistogram[value]
+          if (total >= target) return value / 255
+        }
+        return 1
+      }
+
+      const range = Math.max(0.25, percentile(0.98) - percentile(0.02))
+      const averageChroma = chromaTotal / Math.max(1, pixelCount)
+      const averageRed = redTotal / Math.max(1, pixelCount)
+      const averageGreen = greenTotal / Math.max(1, pixelCount)
+      const averageBlue = blueTotal / Math.max(1, pixelCount)
+      const temperature = Math.min(0.25, Math.max(-0.25, (averageBlue - averageRed) * 0.5))
+      const whiteBalancedLuminance =
+        averageRed * (1 + temperature) * 0.299 +
+        averageGreen * 0.587 +
+        averageBlue * (1 - temperature) * 0.114
+      const nextSettings = {
+        exposure: Math.min(1.25, Math.max(1, 0.5 / Math.max(0.05, whiteBalancedLuminance))),
+        brightness: 1,
+        contrast: Math.min(1.35, Math.max(0.8, 0.82 / range)),
+        saturation: Math.min(1.2, Math.max(0.95, 1.08 + (0.14 - averageChroma) * 0.2)),
+        temperature,
+        vignette: 0,
+      }
+
+      recordHistory()
+      setSettings((current) => ({ ...current, ...nextSettings }))
+      setStatus(`Auto color correction applied to ${photo.name}`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Auto correction failed.')
+    }
+  }
 
   const getCropRectPixels = (
     sourceWidth: number,
@@ -441,7 +770,18 @@ function App() {
       .then(async (image) => {
         if (cancelled) return
 
-        const processed = await renderProcessedImage(image, settings)
+        let processed: HTMLCanvasElement
+        if (showOriginalPreview) {
+          processed = document.createElement('canvas')
+          processed.width = image.naturalWidth
+          processed.height = image.naturalHeight
+          const originalContext = processed.getContext('2d')
+          if (!originalContext) return
+          originalContext.drawImage(image, 0, 0)
+        } else {
+          processed = await renderProcessedImage(image, settings)
+        }
+        if (cancelled) return
         const canvas = previewCanvasRef.current
         if (!canvas) return
 
@@ -478,7 +818,7 @@ function App() {
       })
 
     return () => { cancelled = true }
-  }, [photos, preset, cropApplied, cropAspect, cropRotation, settings, selectedPhotoIndex])
+  }, [photos, preset, cropApplied, cropAspect, cropRotation, settings, selectedPhotoIndex, showOriginalPreview])
 
   useEffect(() => {
     const canvas = previewCanvasRef.current
@@ -779,6 +1119,7 @@ function App() {
   }
 
   const handleCropRotate = (delta: number) => {
+    recordHistory()
     setCropRotation((current) => (current + delta + 360) % 360)
   }
 
@@ -797,6 +1138,7 @@ function App() {
       height: cropRect.height / canvasHeight,
       rotation: cropRotation,
     }
+    recordHistory()
     setCropApplied(nextApplied)
     syncSelectedCropState(null, nextApplied)
     setCropMode(false)
@@ -805,6 +1147,7 @@ function App() {
   }
 
   const handleCropClear = () => {
+    recordHistory()
     setCropApplied(null)
     setCropRect(null)
     if (activePhoto) {
@@ -864,16 +1207,54 @@ function App() {
       return
     }
 
+    setProcessing(true)
+    setStatus('Sending original images and adjustments to Rust…')
+
     try {
+      if (!window.polaroidEngine?.processImages) {
+        throw new Error('Rust image engine is unavailable; export requires native processing.')
+      }
+
+      const processResult = await window.polaroidEngine.processImages({
+        files: photos.map((photo) => photo.path),
+        settings: {
+          exposure: Math.log2(settings.exposure),
+          brightness: settings.brightness,
+          contrast: settings.contrast,
+          saturation: settings.saturation,
+          sharpen: settings.sharpen,
+          temperature: settings.temperature,
+          vignette: settings.vignette,
+          autoRotate: false,
+          format: 'jpeg',
+          dpi: 300,
+        },
+      })
+
+      if (!processResult?.ok || !processResult.files?.length) {
+        throw new Error(processResult?.error ?? 'Rust did not return processed images.')
+      }
+
       const images = await Promise.all(
         photos.map(async (photo, index) => {
           try {
-            const image = await loadImageResource(photo.url)
-            const processed = await renderProcessedImage(image, settings)
+            const outputPath = processResult.files?.[index]
+            if (!outputPath) {
+              throw new Error(`Rust did not process ${photo.name}`)
+            }
+            const image = await loadImageResource(normalizeImageUrl(outputPath))
             const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
-            if (index === selectedPhotoIndex && photoCropApplied) {
-              const cropped = createCroppedCanvas(processed, photoCropApplied)
+            if (photoCropApplied) {
+              const sourceCanvas = document.createElement('canvas')
+              sourceCanvas.width = image.naturalWidth
+              sourceCanvas.height = image.naturalHeight
+              const context = sourceCanvas.getContext('2d')
+              if (!context) {
+                throw new Error('Unable to initialize the crop canvas.')
+              }
+              context.drawImage(image, 0, 0)
+              const cropped = createCroppedCanvas(sourceCanvas, photoCropApplied)
               const nextImage = new Image()
               nextImage.src = cropped.toDataURL('image/png')
               await new Promise<void>((resolve, reject) => {
@@ -890,7 +1271,7 @@ function App() {
         }),
       )
 
-      const sheet = await renderSheet(images, preset, settings, paperSize, exportAutoRotate)
+      const sheet = await renderSheet(images, preset, defaultSettings, paperSize, exportAutoRotate)
       const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
       const dataUrl = sheet.toDataURL(mimeType)
       const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat === 'pdf' ? 'pdf' : exportFormat}`
@@ -899,6 +1280,7 @@ function App() {
         dataUrl,
         format: exportFormat,
         defaultName: fileName,
+        dpi: 300,
       })
 
       if (saveResult && (!saveResult.canceled && saveResult.ok)) {
@@ -920,6 +1302,8 @@ function App() {
       setStatus(`Browser export created: ${fileName}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Export failed.')
+    } finally {
+      setProcessing(false)
     }
   }
 
@@ -1033,7 +1417,7 @@ function App() {
   const operationSummary = buildAdjustmentOperations(settings)
   const stageLabel = activePhoto
     ? `${photos.length} photo${photos.length === 1 ? '' : 's'} | ${activePhoto.name}`
-    : 'No photos loaded yet'
+    : ''
 
   return (
     <div className="app dark">
@@ -1048,37 +1432,76 @@ function App() {
 
       <div className="window-shell">
         <div className="menu-bar">
-          <button title="Open images" onClick={handleOpenNativeDialog}>Open</button>
+          <button title="Add photos" onClick={handleOpenNativeDialog}>Photos</button>
+          <button title="Open project" onClick={handleOpenProject}>Open Project</button>
+          <button title="Save project" onClick={handleSaveProject}>Save Project</button>
           <button title="Clear current selection" onClick={() => {
             setPhotos([])
             setLastOutputDir(null)
-            setStatus('Ready for processing')
+            setUndoStack([])
+            setRedoStack([])
+            setStatus('No photos added yet')
           }}>New</button>
+          <button title="Undo" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
+          <button title="Redo" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>
           <button title="Export print sheet" onClick={openExportDialog}>Export</button>
-          <button title="Run Rust process" onClick={handleProcessWithRust}>Process</button>
+          <button title="Run Rust process" onClick={handleProcessWithRust} disabled={processing}>{processing ? 'Processing…' : 'Process'}</button>
         </div>
 
         <div className="workspace-shell">
           <aside className="tool-rail">
-            <button title="Select" className={`tool-button ${!cropMode ? 'active' : ''}`} aria-label="Select" onClick={() => { setCropMode(false); setCropRect(null) }}>◉</button>
-            <button title="Crop" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" onClick={() => setCropMode((current) => !current)}>◧</button>
-            <button title="Refresh" className="tool-button" aria-label="Refresh">⟳</button>
-            <button title="Undo" className="tool-button" aria-label="Undo">↶</button>
-            <button title="Redo" className="tool-button" aria-label="Redo">↷</button>
+            <div className="tool-group">
+              <button title="Select" className={`tool-button ${!cropMode ? 'active' : ''}`} aria-label="Select" aria-pressed={!cropMode} onClick={() => { setCropMode(false); setCropRect(null) }}>◉</button>
+              <button title="Crop" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={() => setCropMode((current) => !current)}>◧</button>
+            </div>
           </aside>
 
           <main className="main-stage">
             <div className="stage-toolbar">
               <div className="stage-label">{stageLabel}</div>
+              {cropMode ? (
+                <div className="crop-toolbar">
+                  <div className="crop-aspect-list" aria-label="Crop aspect ratio">
+                    {(['Free', 'Square', 'Mini', 'Wide'] as const).map((aspect) => (
+                      <button
+                        key={aspect}
+                        type="button"
+                        className={`crop-chip ${cropAspect === aspect ? 'active' : ''}`}
+                        onClick={() => setCropAspect(aspect)}
+                        title={`Set ${aspect} crop ratio`}
+                      >
+                        {aspect}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="crop-rotate-row">
+                    <button type="button" title="Rotate left" className="ghost-button" onClick={() => handleCropRotate(-90)}>↺</button>
+                    <button type="button" title="Rotate right" className="ghost-button" onClick={() => handleCropRotate(90)}>↻</button>
+                    <span>{cropRotation}°</span>
+                  </div>
+                  {cropRect ? <button type="button" title="Apply crop" className="ghost-button" onClick={handleCropApply}>Apply</button> : null}
+                  {cropRect || cropApplied ? <button type="button" title="Clear crop" className="ghost-button" onClick={handleCropClear}>Clear</button> : null}
+                </div>
+              ) : null}
               <div className="stage-actions">
-                <button title="Previous photo" onClick={() => setSelectedPhotoIndex((current) => Math.max(0, current - 1))}>−</button>
-                <button title="Next photo" onClick={() => setSelectedPhotoIndex((current) => Math.min(photos.length - 1, current + 1))}>+</button>
+                <button title="Previous photo" aria-label="Previous photo" onClick={() => setSelectedPhotoIndex((current) => Math.max(0, current - 1))} disabled={selectedPhotoIndex === 0}>‹</button>
+                <button title="Next photo" aria-label="Next photo" onClick={() => setSelectedPhotoIndex((current) => Math.min(photos.length - 1, current + 1))} disabled={selectedPhotoIndex >= photos.length - 1}>›</button>
+                <button title="Zoom out" aria-label="Zoom out" onClick={() => adjustZoom(0.9)} disabled={zoom <= 0.25}>−</button>
+                <span className="zoom-level">{Math.round(zoom * 100)}%</span>
+                <button title="Zoom in" aria-label="Zoom in" onClick={() => adjustZoom(1.1)} disabled={zoom >= 3}>+</button>
+                <button title="Fit preview" onClick={fitPreview}>Fit</button>
                 <button title="Add photos" onClick={handleAddPhotos}>⤢</button>
               </div>
             </div>
 
             <div
               className="canvas-panel"
+              ref={canvasPanelRef}
+              style={{ cursor: cropMode ? 'crosshair' : isPanning ? 'grabbing' : zoom > 1 ? 'grab' : 'default' }}
+              onPointerDown={handlePanPointerDown}
+              onPointerMove={handlePanPointerMove}
+              onPointerUp={handlePanPointerUp}
+              onPointerCancel={handlePanPointerUp}
               onDragOver={(event) => {
                 event.preventDefault()
               }}
@@ -1091,7 +1514,10 @@ function App() {
               <canvas
                 ref={previewCanvasRef}
                 className={`preview-canvas ${cropMode ? 'crop-enabled' : ''}`}
-                style={{ cursor: cropMode ? cropCursor : 'default' }}
+                style={{
+                  cursor: cropMode ? cropCursor : isPanning ? 'grabbing' : zoom > 1 ? 'grab' : 'default',
+                  transform: `translate(calc(-50% + ${panOffset.x}px), calc(-50% + ${panOffset.y}px)) scale(${zoom})`,
+                }}
                 onMouseDown={handleCropPointerDown}
                 onMouseMove={handleCropPointerMove}
                 onMouseUp={handleCropPointerUp}
@@ -1132,99 +1558,60 @@ function App() {
                   <span key={index} className="histogram-bar" style={{ height: `${Math.max(8, value)}%` }} />
                 ))}
               </div>
-            </div>
-
-            <div className="preset-buttons">
-              <button title="Auto adjust" className="ghost-button active">Auto</button>
-              {cropRect ? (
-                <button title="Apply crop" className="ghost-button" onClick={handleCropApply}>Apply Crop</button>
-              ) : null}
-              {cropRect || cropApplied ? (
-                <button title="Clear crop" className="ghost-button" onClick={handleCropClear}>Clear</button>
-              ) : null}
-            </div>
-
-            <div className="crop-panel-block">
-              <label>Aspect ratio</label>
-              <div className="crop-aspect-list">
-                {(['Free', 'Square', 'Mini', 'Wide'] as const).map((aspect) => (
-                  <button
-                    key={aspect}
-                    type="button"
-                    className={`crop-chip ${cropAspect === aspect ? 'active' : ''}`}
-                    onClick={() => setCropAspect(aspect)}
-                    title={`Set ${aspect} crop ratio`}
-                  >
-                    {aspect}
-                  </button>
-                ))}
+              <div className="histogram-actions">
+                <button type="button" className="auto-correct-button" onClick={handleAutoCorrect} disabled={!activePhoto}>
+                  Auto Color for Print
+                </button>
+                <button
+                  type="button"
+                  className={`compare-preview-button ${showOriginalPreview ? 'active' : ''}`}
+                  title="Hold to view the original image"
+                  aria-label="Hold to view original image"
+                  aria-pressed={showOriginalPreview}
+                  disabled={!activePhoto}
+                  onPointerDown={(event) => {
+                    event.currentTarget.setPointerCapture(event.pointerId)
+                    setShowOriginalPreview(true)
+                  }}
+                  onPointerUp={() => setShowOriginalPreview(false)}
+                  onPointerCancel={() => setShowOriginalPreview(false)}
+                  onLostPointerCapture={() => setShowOriginalPreview(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === ' ' || event.key === 'Enter') setShowOriginalPreview(true)
+                  }}
+                  onKeyUp={() => setShowOriginalPreview(false)}
+                  onBlur={() => setShowOriginalPreview(false)}
+                >
+                  Before / After
+                </button>
               </div>
-              <div className="crop-rotate-row">
-                <button type="button" title="Rotate left" className="ghost-button" onClick={() => handleCropRotate(-90)}>↺</button>
-                <button type="button" title="Rotate right" className="ghost-button" onClick={() => handleCropRotate(90)}>↻</button>
-                <span>{cropRotation}°</span>
-              </div>
-            </div>
-
-            <div className="template-row">
-              <label>Layout</label>
-              <select title="Choose print layout" value={preset} onChange={(event) => setPreset(event.target.value as PresetKey)}>
-                {Object.values(PRESETS).map((item) => (
-                  <option key={item.key} value={item.key}>{item.label}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="template-row">
-              <label>Paper Size</label>
-              <select title="Choose paper size" value={paperSize} onChange={(event) => setPaperSize(event.target.value as PaperSizeKey)}>
-                {Object.entries(PAPER_SIZES).map(([key, item]) => (
-                  <option key={key} value={key}>{item.label}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="template-row">
-              <label>Export format</label>
-              <select title="Choose export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as 'png' | 'jpeg' | 'pdf')}>
-                <option value="png">PNG</option>
-                <option value="jpeg">JPEG</option>
-                <option value="pdf">PDF</option>
-              </select>
-            </div>
-
-            <div className="action-row">
-              <button title="Run Rust processing" className="action-button" onClick={handleProcessWithRust} disabled={processing || photos.length === 0}>
-                {processing ? 'Processing…' : 'Rust Process'}
-              </button>
-              <button title="Open export sheet dialog" className="action-button" onClick={openExportDialog}>Export Sheet</button>
-            </div>
-
-            <div className="status-box">
-              <span>Status</span>
-              <strong>{status}</strong>
-              {lastOutputDir ? <small>{lastOutputDir}</small> : null}
             </div>
 
             <div className="slider-stack">
-              <SliderControl label="Exposure" value={settings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} />
-              <SliderControl label="Brightness" value={settings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} />
-              <SliderControl label="Contrast" value={settings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} />
+              <SliderControl label="Exposure" value={settings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Brightness" value={settings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Contrast" value={settings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Levels Black" value={0} min={0} max={1} step={0.01} onChange={() => undefined} />
               <SliderControl label="Levels Mid" value={1.3} min={0.2} max={3} step={0.01} onChange={() => undefined} />
               <SliderControl label="Levels White" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
               <SliderControl label="Highlights" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
               <SliderControl label="Shadows" value={0} min={0} max={2} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Temperature" value={settings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} />
+              <SliderControl label="Temperature" value={settings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Vibrance" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Saturation" value={settings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} />
+              <SliderControl label="Saturation" value={settings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Hue" value={0} min={-1} max={1} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Sharpness" value={settings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} />
+              <SliderControl label="Sharpness" value={settings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Noise Reduction" value={0} min={0} max={1} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Vignette" value={settings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} />
+              <SliderControl label="Vignette" value={settings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} onInteractionStart={recordHistory} />
             </div>
           </aside>
         </div>
+
+        <footer className="status-bar" role="status" aria-live="polite">
+          <span>Status</span>
+          <strong>{status}</strong>
+          {lastOutputDir ? <small title={lastOutputDir}>{lastOutputDir}</small> : null}
+        </footer>
       </div>
 
       {showExportDialog ? (

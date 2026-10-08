@@ -66,9 +66,13 @@ impl ExportFormat {
 #[derive(Clone, Copy, Debug)]
 struct ImageProcessingSettings {
     exposure: f32,
+    brightness: f32,
     contrast: f32,
     gamma: f32,
+    saturation: f32,
     sharpen: f32,
+    temperature: f32,
+    vignette: f32,
     chroma_nr: f32,
     auto_rotate: bool,
     export_format: ExportFormat,
@@ -157,9 +161,13 @@ impl App {
         let photo_paths = self.loaded_photo_paths.clone();
         let settings = ImageProcessingSettings {
             exposure: self.exposure,
+            brightness: 1.0,
             contrast: self.contrast,
             gamma: self.gamma,
+            saturation: 1.0,
             sharpen: self.sharpen,
+            temperature: 0.0,
+            vignette: 0.0,
             chroma_nr: self.chroma_nr,
             auto_rotate: self.auto_rotate,
             export_format: self.export_format,
@@ -465,7 +473,9 @@ impl ImageProcessingPipeline {
             .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
 
         let output_path = output_dir.join(format!("{file_name}_{}.jpg", index + 1));
-        rgba.save_with_format(&output_path, ImageFormat::Jpeg)
+        image::DynamicImage::ImageRgba8(rgba)
+            .to_rgb8()
+            .save_with_format(&output_path, ImageFormat::Jpeg)
             .map_err(|err| format!("{}: {}", source.display(), err))?;
 
         Ok(output_path)
@@ -475,22 +485,43 @@ impl ImageProcessingPipeline {
         let (width, height) = rgba.dimensions();
         let original = rgba.clone();
 
+        let center_x = width as f32 / 2.0;
+        let center_y = height as f32 / 2.0;
+        let max_distance = center_x.hypot(center_y).max(1.0);
+
         for y in 0..height {
             for x in 0..width {
                 let pixel = original.get_pixel(x, y);
-                let mut channels = [0.0_f32; 4];
-                for channel in 0..3 {
-                    let value = pixel[channel] as f32 / 255.0;
-                    let adjusted = self.adjust_channel(value, channel);
-                    channels[channel] = adjusted;
+                let mut channels = [
+                    pixel[0] as f32 / 255.0,
+                    pixel[1] as f32 / 255.0,
+                    pixel[2] as f32 / 255.0,
+                ];
+                let exposure = 2.0_f32.powf(self.settings.exposure);
+                for channel in &mut channels {
+                    *channel = (*channel * exposure * self.settings.brightness).clamp(0.0, 1.0);
+                    *channel = channel.powf(1.0 / self.settings.gamma.max(0.001));
                 }
-                channels[3] = 1.0;
 
-                let mut final_rgba = [0_u8; 4];
-                for channel in 0..3 {
-                    final_rgba[channel] = (channels[channel].clamp(0.0, 1.0) * 255.0).round() as u8;
+                let luminance = channels[0] * 0.299 + channels[1] * 0.587 + channels[2] * 0.114;
+                let mean = (channels[0] + channels[1] + channels[2]) / 3.0;
+                for channel in &mut channels {
+                    *channel = ((*channel - mean) * self.settings.contrast + mean).clamp(0.0, 1.0);
+                    *channel = (luminance + (*channel - luminance) * self.settings.saturation).clamp(0.0, 1.0);
                 }
-                final_rgba[3] = pixel[3];
+
+                let temperature = self.settings.temperature * 0.3;
+                channels[0] = (channels[0] * (1.0 + temperature)).clamp(0.0, 1.0);
+                channels[2] = (channels[2] * (1.0 - temperature)).clamp(0.0, 1.0);
+
+                let distance = ((x as f32 - center_x).hypot(y as f32 - center_y) / max_distance).min(1.0);
+                let vignette = (1.0 - distance * self.settings.vignette).clamp(0.0, 1.0);
+                let final_rgba = [
+                    (channels[0] * vignette * 255.0).round() as u8,
+                    (channels[1] * vignette * 255.0).round() as u8,
+                    (channels[2] * vignette * 255.0).round() as u8,
+                    pixel[3],
+                ];
                 rgba.put_pixel(x, y, Rgba(final_rgba));
             }
         }
@@ -498,18 +529,6 @@ impl ImageProcessingPipeline {
         if self.settings.sharpen > 0.0 {
             self.apply_unsharp_mask(rgba);
         }
-    }
-
-    fn adjust_channel(&self, value: f32, channel_index: usize) -> f32 {
-        let mut v = value;
-
-        if channel_index < 3 {
-            v = (v - 0.5) * self.settings.contrast + 0.5;
-            v = v.powf(1.0 / self.settings.gamma.max(0.001));
-            v = (v * (2.0_f32).powf(self.settings.exposure)).clamp(0.0, 1.0);
-        }
-
-        v
     }
 
     fn apply_unsharp_mask(&self, rgba: &mut RgbaImage) {
@@ -586,9 +605,13 @@ fn parse_headless_request() -> Result<HeadlessRequest, String> {
     let mut files = Vec::new();
     let mut output_dir = None;
     let mut exposure = 0.0_f32;
+    let mut brightness = 1.0_f32;
     let mut contrast = 1.0_f32;
     let mut gamma = 1.0_f32;
+    let mut saturation = 1.0_f32;
     let mut sharpen = 0.0_f32;
+    let mut temperature = 0.0_f32;
+    let mut vignette = 0.0_f32;
     let mut chroma_nr = 0.0_f32;
     let mut auto_rotate = true;
     let mut export_format = ExportFormat::Jpeg;
@@ -621,6 +644,13 @@ fn parse_headless_request() -> Result<HeadlessRequest, String> {
                 exposure = args[index + 1].parse().map_err(|_| "invalid exposure value".to_owned())?;
                 index += 2;
             }
+            "--brightness" => {
+                if index + 1 >= args.len() {
+                    return Err("--brightness requires a value".to_owned());
+                }
+                brightness = args[index + 1].parse().map_err(|_| "invalid brightness value".to_owned())?;
+                index += 2;
+            }
             "--contrast" => {
                 if index + 1 >= args.len() {
                     return Err("--contrast requires a value".to_owned());
@@ -635,11 +665,32 @@ fn parse_headless_request() -> Result<HeadlessRequest, String> {
                 gamma = args[index + 1].parse().map_err(|_| "invalid gamma value".to_owned())?;
                 index += 2;
             }
+            "--saturation" => {
+                if index + 1 >= args.len() {
+                    return Err("--saturation requires a value".to_owned());
+                }
+                saturation = args[index + 1].parse().map_err(|_| "invalid saturation value".to_owned())?;
+                index += 2;
+            }
             "--sharpen" => {
                 if index + 1 >= args.len() {
                     return Err("--sharpen requires a value".to_owned());
                 }
                 sharpen = args[index + 1].parse().map_err(|_| "invalid sharpen value".to_owned())?;
+                index += 2;
+            }
+            "--temperature" => {
+                if index + 1 >= args.len() {
+                    return Err("--temperature requires a value".to_owned());
+                }
+                temperature = args[index + 1].parse().map_err(|_| "invalid temperature value".to_owned())?;
+                index += 2;
+            }
+            "--vignette" => {
+                if index + 1 >= args.len() {
+                    return Err("--vignette requires a value".to_owned());
+                }
+                vignette = args[index + 1].parse().map_err(|_| "invalid vignette value".to_owned())?;
                 index += 2;
             }
             "--auto-rotate" => {
@@ -683,9 +734,13 @@ fn parse_headless_request() -> Result<HeadlessRequest, String> {
         output_dir,
         settings: ImageProcessingSettings {
             exposure,
+            brightness,
             contrast,
             gamma,
+            saturation,
             sharpen,
+            temperature,
+            vignette,
             chroma_nr,
             auto_rotate,
             export_format,

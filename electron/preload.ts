@@ -25,18 +25,41 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
     filePaths: string[]
     dataUrls?: string[]
   }>,
-  saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf' }) => ipcRenderer.invoke('save-export', payload),
+  openProject: () => ipcRenderer.invoke('open-project') as Promise<{
+    canceled: boolean
+    project?: {
+      photos?: Array<{ name?: string; path?: string; dataUrl?: string; cropApplied?: unknown }>
+      [key: string]: unknown
+    }
+    error?: string
+  }>,
+  saveProject: (project: unknown) => ipcRenderer.invoke('save-project', project) as Promise<{
+    ok: boolean
+    canceled?: boolean
+    filePath?: string
+  }>,
+  saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => ipcRenderer.invoke('save-export', payload),
   processImages: (request: {
     files: string[]
     outputDir?: string
     settings?: {
       exposure?: number
+      brightness?: number
       contrast?: number
       gamma?: number
+      saturation?: number
       sharpen?: number
+      temperature?: number
+      vignette?: number
       autoRotate?: boolean
       format?: 'jpeg' | 'jpg' | 'pdf'
       dpi?: number
     }
-  }) => ipcRenderer.invoke('rust:process', request),
+  }) => ipcRenderer.invoke('rust:process', request) as Promise<{
+    ok: boolean
+    outputDir?: string
+    files?: string[]
+    message?: string
+    error?: string
+  }>,
 })
