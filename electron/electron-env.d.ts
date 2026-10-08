@@ -26,7 +26,7 @@ interface Window {
   ipcRenderer: import('electron').IpcRenderer
   polaroidEngine: {
     openImagePicker: () => Promise<{ canceled: boolean; filePaths: string[] }>
-    saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
+    saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf' }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
     processImages: (request: {
       files: string[]
       outputDir?: string

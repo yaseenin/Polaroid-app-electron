@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { PDFDocument } from 'pdf-lib'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -93,15 +94,15 @@ ipcMain.handle('open-image-dialog', async () => {
   }
 })
 
-ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' }) => {
+ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf' }) => {
   const format = payload.format ?? 'png'
-  const extension = format === 'jpeg' ? 'jpg' : 'png'
+  const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : 'png'
   const defaultName = payload.defaultName.endsWith(`.${extension}`) ? payload.defaultName : `${payload.defaultName.replace(/\.[^.]+$/, '') || 'export'}.${extension}`
 
   const { canceled, filePath } = await dialog.showSaveDialog({
     title: 'Save print sheet',
     defaultPath: defaultName,
-    filters: [{ name: format === 'jpeg' ? 'JPEG Image' : 'PNG Image', extensions: [extension] }],
+    filters: [{ name: format === 'pdf' ? 'PDF Document' : format === 'jpeg' ? 'JPEG Image' : 'PNG Image', extensions: [extension] }],
   })
 
   if (canceled || !filePath) {
@@ -109,6 +110,29 @@ ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; default
   }
 
   const normalizedPath = filePath.toLowerCase().endsWith(`.${extension}`) ? filePath : `${filePath}.${extension}`
+
+  if (format === 'pdf') {
+    const matches = payload.dataUrl.match(/^data:image\/(png|jpeg);base64,(.+)$/)
+    const isPng = (matches?.[1] ?? 'png') === 'png'
+    const base64 = matches ? matches[2] : payload.dataUrl.replace(/^data:image\/.*;base64,/, '')
+    const imageBytes = Buffer.from(base64, 'base64')
+    const pdfDoc = await PDFDocument.create()
+    const image = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes)
+    const page = pdfDoc.addPage([image.width, image.height])
+    const scale = Math.min(page.getWidth() / image.width, page.getHeight() / image.height)
+    const width = image.width * scale
+    const height = image.height * scale
+    page.drawImage(image, {
+      x: (page.getWidth() - width) / 2,
+      y: (page.getHeight() - height) / 2,
+      width,
+      height,
+    })
+    const pdfBytes = await pdfDoc.save()
+    await fs.promises.writeFile(normalizedPath, pdfBytes)
+    return { ok: true, filePath: normalizedPath }
+  }
+
   const matches = payload.dataUrl.match(new RegExp(`^data:image\\/(png|jpeg);base64,(.+)$`))
   const base64 = matches ? matches[2] : payload.dataUrl.replace(/^data:image\/.*;base64,/, '')
   const buffer = Buffer.from(base64, 'base64')

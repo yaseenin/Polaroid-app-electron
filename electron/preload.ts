@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
     filePaths: string[]
     dataUrls?: string[]
   }>,
-  saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' }) => ipcRenderer.invoke('save-export', payload),
+  saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf' }) => ipcRenderer.invoke('save-export', payload),
   processImages: (request: {
     files: string[]
     outputDir?: string
