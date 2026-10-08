@@ -1,0 +1,13 @@
+[package]
+name = "polaroid_print_imposition_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+image = "0.25"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+rfd = "0.15"
