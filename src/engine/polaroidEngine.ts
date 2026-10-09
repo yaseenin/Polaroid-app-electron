@@ -223,21 +223,6 @@ export function buildSheetLayout(
 }
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value))
-const rgba = (source: Uint8ClampedArray, i: number) => ({
-  r: source[i] / 255,
-  g: source[i + 1] / 255,
-  b: source[i + 2] / 255,
-  a: source[i + 3] / 255,
-})
-
-const applyToneLevels = (value: number, black: number, mid: number, white: number) => {
-  const lower = Math.min(black, white)
-  const upper = Math.max(black, white)
-  const safeRange = Math.max(0.0001, upper - lower)
-  const normalized = clamp01((value - lower) / safeRange)
-  const gamma = Math.max(0.05, mid)
-  return clamp01(Math.pow(normalized, 1 / gamma))
-}
 
 const rgbToHsl = (r: number, g: number, b: number) => {
   const max = Math.max(r, g, b)
@@ -278,189 +263,258 @@ const hslToRgb = (h: number, s: number, l: number) => {
   return { r: r + m, g: g + m, b: b + m }
 }
 
-function applyProcessingToPixels(source: Uint8ClampedArray, width: number, height: number, settings: AdjustmentSettings) {
-  const data = new Float32Array(source.length)
+let sharedBuffer: Float32Array | null = null
+function getSharedBuffer(size: number): Float32Array {
+  if (!sharedBuffer || sharedBuffer.length < size) {
+    sharedBuffer = new Float32Array(size)
+  }
+  return sharedBuffer
+}
 
-  for (let index = 0; index < source.length; index += 4) {
-    const { r, g, b } = rgba(source, index)
-    data[index] = r
-    data[index + 1] = g
-    data[index + 2] = b
-    data[index + 3] = source[index + 3] / 255
+let sharedConvBuffer: Float32Array | null = null
+function getSharedConvBuffer(size: number): Float32Array {
+  if (!sharedConvBuffer || sharedConvBuffer.length < size) {
+    sharedConvBuffer = new Float32Array(size)
+  }
+  return sharedConvBuffer
+}
+
+function applyProcessingToPixels(source: Uint8ClampedArray, width: number, height: number, settings: AdjustmentSettings) {
+  const operations = buildAdjustmentOperations(settings)
+  if (operations.length === 0) {
+    return
   }
 
-  for (let index = 0; index < data.length; index += 4) {
-    let r = data[index]
-    let g = data[index + 1]
-    let b = data[index + 2]
+  const gain = settings.exposure * settings.brightness
+  const hasGain = gain !== 1
+  const contrast = settings.contrast
+  const hasContrast = contrast !== 1
 
-    r = clamp01(r * settings.exposure)
-    g = clamp01(g * settings.exposure)
-    b = clamp01(b * settings.exposure)
+  const hasLevels = settings.levelsBlack !== 0 || settings.levelsMid !== 1 || settings.levelsWhite !== 1
+  let toneLut: Float32Array | null = null
+  if (hasLevels) {
+    toneLut = new Float32Array(1025)
+    const lower = Math.min(settings.levelsBlack, settings.levelsWhite)
+    const upper = Math.max(settings.levelsBlack, settings.levelsWhite)
+    const safeRange = Math.max(0.0001, upper - lower)
+    const invGamma = 1 / Math.max(0.05, settings.levelsMid)
+    for (let i = 0; i <= 1024; i += 1) {
+      const normalized = clamp01((i / 1024 - lower) / safeRange)
+      toneLut[i] = clamp01(Math.pow(normalized, invGamma))
+    }
+  }
 
-    r = clamp01(r * settings.brightness)
-    g = clamp01(g * settings.brightness)
-    b = clamp01(b * settings.brightness)
+  const highlightStrength = settings.highlights
+  const hasHighlights = highlightStrength !== 1
+  const highlightAmount = highlightStrength - 1
+  const highlightIntensity = Math.abs(highlightAmount) * 0.9
 
-    const luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    const mean = (r + g + b) / 3
+  const hasShadows = settings.shadows > 0
+  const shadowAmount = settings.shadows * 0.8
 
-    r = clamp01((r - mean) * settings.contrast + mean)
-    g = clamp01((g - mean) * settings.contrast + mean)
-    b = clamp01((b - mean) * settings.contrast + mean)
+  const vibranceFactor = 1 + (settings.vibrance - 1) * 0.9
+  const saturationFactor = settings.saturation * vibranceFactor
+  const hasSat = saturationFactor !== 1
 
-    r = applyToneLevels(r, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
-    g = applyToneLevels(g, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
-    b = applyToneLevels(b, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
+  const hasHue = settings.hue !== 0
+  const hueRot = settings.hue * 360
 
-    const highlightStrength = settings.highlights
-    if (highlightStrength !== 1) {
-      const highlightAmount = highlightStrength - 1
-      const tone = clamp01((r + g + b) / 3)
-      const highlightLift = Math.max(0, tone - 0.5) * 2
-      const intensity = Math.abs(highlightAmount) * 0.9
-      if (highlightAmount > 0) {
-        r = clamp01(r + (1 - r) * intensity * highlightLift)
-        g = clamp01(g + (1 - g) * intensity * highlightLift)
-        b = clamp01(b + (1 - b) * intensity * highlightLift)
-      } else {
-        r = clamp01(r - r * intensity * highlightLift)
-        g = clamp01(g - g * intensity * highlightLift)
-        b = clamp01(b - b * intensity * highlightLift)
+  const hasTemp = settings.temperature !== 0
+  const tempAmount = settings.temperature * 0.3
+  const tempR = 1 + tempAmount
+  const tempB = 1 - tempAmount
+
+  const hasVignette = settings.vignette > 0
+  const vignetteStrength = settings.vignette
+  const cx = width / 2
+  const cy = height / 2
+  const maxDistance = Math.hypot(cx, cy)
+  const invMaxDist = 1 / Math.max(1, maxDistance)
+  const dx2 = new Float32Array(width)
+  if (hasVignette) {
+    for (let x = 0; x < width; x += 1) {
+      const dx = x - cx
+      dx2[x] = dx * dx
+    }
+  }
+
+  const totalChannels = width * height * 4
+  const data = getSharedBuffer(totalChannels)
+  const inv255 = 1 / 255
+
+  for (let y = 0; y < height; y += 1) {
+    const dy = y - cy
+    const dy2 = dy * dy
+    const rowOffset = y * width * 4
+    for (let x = 0; x < width; x += 1) {
+      const index = rowOffset + (x << 2)
+      let r = source[index] * inv255
+      let g = source[index + 1] * inv255
+      let b = source[index + 2] * inv255
+      data[index + 3] = source[index + 3] * inv255
+
+      if (hasGain) {
+        r = clamp01(r * gain)
+        g = clamp01(g * gain)
+        b = clamp01(b * gain)
       }
+
+      if (hasContrast) {
+        const mean = (r + g + b) * 0.3333333333333333
+        r = clamp01((r - mean) * contrast + mean)
+        g = clamp01((g - mean) * contrast + mean)
+        b = clamp01((b - mean) * contrast + mean)
+      }
+
+      if (toneLut) {
+        r = toneLut[(r * 1024 + 0.5) | 0]
+        g = toneLut[(g * 1024 + 0.5) | 0]
+        b = toneLut[(b * 1024 + 0.5) | 0]
+      }
+
+      if (hasHighlights) {
+        const tone = (r + g + b) * 0.3333333333333333
+        const highlightLift = Math.max(0, tone - 0.5) * 2
+        const lift = highlightIntensity * highlightLift
+        if (highlightAmount > 0) {
+          r = clamp01(r + (1 - r) * lift)
+          g = clamp01(g + (1 - g) * lift)
+          b = clamp01(b + (1 - b) * lift)
+        } else {
+          r = clamp01(r - r * lift)
+          g = clamp01(g - g * lift)
+          b = clamp01(b - b * lift)
+        }
+      }
+
+      if (hasShadows) {
+        const shadowTone = 1 - (r + g + b) * 0.3333333333333333
+        const darken = Math.max(0, shadowTone)
+        const factor = 1 - shadowAmount * darken
+        r = clamp01(r * factor)
+        g = clamp01(g * factor)
+        b = clamp01(b * factor)
+      }
+
+      if (hasSat) {
+        const luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        r = clamp01(luminance + (r - luminance) * saturationFactor)
+        g = clamp01(luminance + (g - luminance) * saturationFactor)
+        b = clamp01(luminance + (b - luminance) * saturationFactor)
+      }
+
+      if (hasHue) {
+        const { h, s, l } = rgbToHsl(r, g, b)
+        const rotatedHue = (h + hueRot + 360) % 360
+        const { r: hr, g: hg, b: hb } = hslToRgb(rotatedHue, s, l)
+        r = clamp01(hr)
+        g = clamp01(hg)
+        b = clamp01(hb)
+      }
+
+      if (hasTemp) {
+        r = clamp01(r * tempR)
+        b = clamp01(b * tempB)
+      }
+
+      if (hasVignette) {
+        const dist = Math.sqrt(dx2[x] + dy2) * invMaxDist
+        const vig = clamp01(1 - dist * vignetteStrength)
+        r = clamp01(r * vig)
+        g = clamp01(g * vig)
+        b = clamp01(b * vig)
+      }
+
+      data[index] = r
+      data[index + 1] = g
+      data[index + 2] = b
     }
-
-    if (settings.shadows > 0) {
-      const shadowAmount = settings.shadows * 0.8
-      const shadowTone = 1 - ((r + g + b) / 3)
-      const darken = Math.max(0, shadowTone)
-      r = clamp01(r * (1 - shadowAmount * darken))
-      g = clamp01(g * (1 - shadowAmount * darken))
-      b = clamp01(b * (1 - shadowAmount * darken))
-    }
-
-    const vibranceFactor = 1 + (settings.vibrance - 1) * 0.9
-    const saturationFactor = settings.saturation * vibranceFactor
-    r = clamp01(luminance + (r - luminance) * saturationFactor)
-    g = clamp01(luminance + (g - luminance) * saturationFactor)
-    b = clamp01(luminance + (b - luminance) * saturationFactor)
-
-    if (settings.hue !== 0) {
-      const { h, s, l } = rgbToHsl(r, g, b)
-      const rotatedHue = (h + settings.hue * 360 + 360) % 360
-      const { r: hueR, g: hueG, b: hueB } = hslToRgb(rotatedHue, s, l)
-      r = clamp01(hueR)
-      g = clamp01(hueG)
-      b = clamp01(hueB)
-    }
-
-    const temperatureAmount = settings.temperature * 0.3
-    r = clamp01(r * (1 + temperatureAmount))
-    b = clamp01(b * (1 - temperatureAmount))
-
-    data[index] = r
-    data[index + 1] = g
-    data[index + 2] = b
-    data[index + 3] = data[index + 3]
   }
 
   if (settings.noiseReduction > 0) {
-    const temp = new Float32Array(data)
+    const temp = getSharedConvBuffer(totalChannels)
+    temp.set(data.subarray(0, totalChannels))
     const strength = clamp01(settings.noiseReduction / 2)
+    const invStrength = 1 - strength
+    const invSamples = 1 / 9
 
     for (let y = 1; y < height - 1; y += 1) {
+      const rowOffset = y * width * 4
       for (let x = 1; x < width - 1; x += 1) {
-        const index = (y * width + x) * 4
+        const index = rowOffset + (x << 2)
         let sumR = 0
         let sumG = 0
         let sumB = 0
-        let samples = 0
 
         for (let yy = y - 1; yy <= y + 1; yy += 1) {
+          const nRow = yy * width * 4
           for (let xx = x - 1; xx <= x + 1; xx += 1) {
-            const neighborIndex = (yy * width + xx) * 4
-            sumR += temp[neighborIndex]
-            sumG += temp[neighborIndex + 1]
-            sumB += temp[neighborIndex + 2]
-            samples += 1
+            const nIndex = nRow + (xx << 2)
+            sumR += temp[nIndex]
+            sumG += temp[nIndex + 1]
+            sumB += temp[nIndex + 2]
           }
         }
 
-        const averageR = sumR / samples
-        const averageG = sumG / samples
-        const averageB = sumB / samples
-
-        data[index] = clamp01(temp[index] * (1 - strength) + averageR * strength)
-        data[index + 1] = clamp01(temp[index + 1] * (1 - strength) + averageG * strength)
-        data[index + 2] = clamp01(temp[index + 2] * (1 - strength) + averageB * strength)
+        data[index] = clamp01(temp[index] * invStrength + sumR * invSamples * strength)
+        data[index + 1] = clamp01(temp[index + 1] * invStrength + sumG * invSamples * strength)
+        data[index + 2] = clamp01(temp[index + 2] * invStrength + sumB * invSamples * strength)
       }
     }
   }
 
   if (settings.sharpen > 0) {
-    const temp = new Float32Array(data)
+    const temp = getSharedConvBuffer(totalChannels)
+    temp.set(data.subarray(0, totalChannels))
+    const amount = settings.sharpen
+    const invSamples = 1 / 9
 
     for (let y = 1; y < height - 1; y += 1) {
+      const rowOffset = y * width * 4
       for (let x = 1; x < width - 1; x += 1) {
-        const index = (y * width + x) * 4
-        let blurR = 0
-        let blurG = 0
-        let blurB = 0
-        let samples = 0
+        const index = rowOffset + (x << 2)
+        let sumR = 0
+        let sumG = 0
+        let sumB = 0
 
         for (let yy = y - 1; yy <= y + 1; yy += 1) {
+          const nRow = yy * width * 4
           for (let xx = x - 1; xx <= x + 1; xx += 1) {
-            const neighborIndex = (yy * width + xx) * 4
-            blurR += temp[neighborIndex]
-            blurG += temp[neighborIndex + 1]
-            blurB += temp[neighborIndex + 2]
-            samples += 1
+            const nIndex = nRow + (xx << 2)
+            sumR += temp[nIndex]
+            sumG += temp[nIndex + 1]
+            sumB += temp[nIndex + 2]
           }
         }
-
-        const blurAmountR = blurR / samples
-        const blurAmountG = blurG / samples
-        const blurAmountB = blurB / samples
 
         const baseR = temp[index]
         const baseG = temp[index + 1]
         const baseB = temp[index + 2]
 
-        data[index] = clamp01(baseR + (baseR - blurAmountR) * settings.sharpen)
-        data[index + 1] = clamp01(baseG + (baseG - blurAmountG) * settings.sharpen)
-        data[index + 2] = clamp01(baseB + (baseB - blurAmountB) * settings.sharpen)
+        data[index] = clamp01(baseR + (baseR - sumR * invSamples) * amount)
+        data[index + 1] = clamp01(baseG + (baseG - sumG * invSamples) * amount)
+        data[index + 2] = clamp01(baseB + (baseB - sumB * invSamples) * amount)
       }
     }
   }
 
-  if (settings.vignette > 0) {
-    const cx = width / 2
-    const cy = height / 2
-    const maxDistance = Math.sqrt(cx * cx + cy * cy)
-
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        const index = (y * width + x) * 4
-        const distance = Math.hypot(x - cx, y - cy) / maxDistance
-        const vignette = 1 - distance * settings.vignette
-        data[index] = clamp01(data[index] * vignette)
-        data[index + 1] = clamp01(data[index + 1] * vignette)
-        data[index + 2] = clamp01(data[index + 2] * vignette)
-      }
-    }
-  }
-
-  for (let index = 0; index < data.length; index += 4) {
-    source[index] = Math.round(data[index] * 255)
-    source[index + 1] = Math.round(data[index + 1] * 255)
-    source[index + 2] = Math.round(data[index + 2] * 255)
+  for (let index = 0; index < totalChannels; index += 4) {
+    source[index] = (data[index] * 255 + 0.5) | 0
+    source[index + 1] = (data[index + 1] * 255 + 0.5) | 0
+    source[index + 2] = (data[index + 2] * 255 + 0.5) | 0
   }
 }
 
-export async function renderProcessedImage(image: HTMLImageElement, settings: AdjustmentSettings): Promise<HTMLCanvasElement> {
+export async function renderProcessedImage(
+  image: HTMLImageElement | HTMLCanvasElement,
+  settings: AdjustmentSettings,
+): Promise<HTMLCanvasElement> {
+  const width = 'naturalWidth' in image ? image.naturalWidth : image.width
+  const height = 'naturalHeight' in image ? image.naturalHeight : image.height
+
   const canvas = document.createElement('canvas')
-  canvas.width = image.naturalWidth
-  canvas.height = image.naturalHeight
+  canvas.width = width
+  canvas.height = height
 
   const context = canvas.getContext('2d')
   if (!context) {
@@ -468,6 +522,12 @@ export async function renderProcessedImage(image: HTMLImageElement, settings: Ad
   }
 
   context.drawImage(image, 0, 0)
+
+  // Early return if settings are at default values
+  if (buildAdjustmentOperations(settings).length === 0) {
+    return canvas
+  }
+
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
   applyProcessingToPixels(imageData.data, canvas.width, canvas.height, settings)
   context.putImageData(imageData, 0, 0)
@@ -493,7 +553,7 @@ function rotateCanvas90(source: HTMLCanvasElement, direction: 1 | -1): HTMLCanva
 }
 
 export async function renderPolaroidCard(
-  sourceImage: HTMLImageElement,
+  sourceImage: HTMLImageElement | HTMLCanvasElement,
   presetKey: PresetKey,
   settings: AdjustmentSettings,
   autoRotate = false,
@@ -526,7 +586,7 @@ export async function renderPolaroidCard(
 }
 
 export async function renderSheet(
-  sourceImages: HTMLImageElement[],
+  sourceImages: (HTMLImageElement | HTMLCanvasElement)[],
   presetKey: PresetKey,
   settings: AdjustmentSettings,
   paperSize: PaperSizeKey = 'A4',

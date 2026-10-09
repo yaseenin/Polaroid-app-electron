@@ -21,7 +21,8 @@ const RUST_MANIFEST_PATH = path.join(process.env.APP_ROOT, 'rust', 'Cargo.toml')
 const RUST_BINARY_NAME = process.platform === 'win32'
   ? 'polaroid_print_imposition_engine.exe'
   : 'polaroid_print_imposition_engine'
-const RUST_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'debug', RUST_BINARY_NAME)
+const RUST_RELEASE_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'release', RUST_BINARY_NAME)
+const RUST_DEBUG_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'debug', RUST_BINARY_NAME)
 
 type RustProcessRequest = {
   files: string[]
@@ -50,8 +51,11 @@ type RustProcessResponse = {
 }
 
 function ensureRustEngineReady(): string {
-  if (fs.existsSync(RUST_BINARY_PATH)) {
-    return RUST_BINARY_PATH
+  if (fs.existsSync(RUST_RELEASE_BINARY_PATH)) {
+    return RUST_RELEASE_BINARY_PATH
+  }
+  if (fs.existsSync(RUST_DEBUG_BINARY_PATH)) {
+    return RUST_DEBUG_BINARY_PATH
   }
 
   const cargoName = process.platform === 'win32' ? 'cargo.exe' : 'cargo'
@@ -61,7 +65,7 @@ function ensureRustEngineReady(): string {
     ...(process.platform === 'darwin' ? ['/opt/homebrew/bin/cargo', '/usr/local/bin/cargo'] : []),
   ].find((candidate) => fs.existsSync(candidate)) ?? cargoName
 
-  const result = spawnSync(cargoPath, ['build', '--manifest-path', RUST_MANIFEST_PATH, '--color', 'never'], {
+  const result = spawnSync(cargoPath, ['build', '--release', '--manifest-path', RUST_MANIFEST_PATH, '--color', 'never'], {
     cwd: process.env.APP_ROOT,
     env: process.env,
     encoding: 'utf8',
@@ -77,11 +81,26 @@ function ensureRustEngineReady(): string {
     throw new Error(output || 'Failed to build the Rust processing engine.')
   }
 
-  if (!fs.existsSync(RUST_BINARY_PATH)) {
-    throw new Error(`Rust engine binary was not found at ${RUST_BINARY_PATH}`)
+  if (fs.existsSync(RUST_RELEASE_BINARY_PATH)) {
+    return RUST_RELEASE_BINARY_PATH
+  }
+  if (fs.existsSync(RUST_DEBUG_BINARY_PATH)) {
+    return RUST_DEBUG_BINARY_PATH
   }
 
-  return RUST_BINARY_PATH
+  throw new Error(`Rust engine binary was not found at ${RUST_RELEASE_BINARY_PATH}`)
+}
+
+async function fileToDataUrlAsync(filePath: string): Promise<string> {
+  const buffer = await fs.promises.readFile(filePath)
+  const extension = path.extname(filePath).toLowerCase()
+  const mime = extension === '.png'
+    ? 'image/png'
+    : extension === '.webp'
+      ? 'image/webp'
+      : 'image/jpeg'
+
+  return `data:${mime};base64,${buffer.toString('base64')}`
 }
 
 function fileToDataUrl(filePath: string): string {
@@ -103,10 +122,20 @@ ipcMain.handle('open-image-dialog', async () => {
     filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
   })
 
+  if (canceled || !filePaths.length) {
+    return {
+      canceled: true,
+      filePaths: [],
+      dataUrls: [],
+    }
+  }
+
+  const dataUrls = await Promise.all(filePaths.map(fileToDataUrlAsync))
+
   return {
-    canceled,
+    canceled: false,
     filePaths,
-    dataUrls: canceled ? [] : filePaths.map(fileToDataUrl),
+    dataUrls,
   }
 })
 
@@ -310,6 +339,7 @@ function createWindow() {
     icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
+      webSecurity: false,
     },
   })
 

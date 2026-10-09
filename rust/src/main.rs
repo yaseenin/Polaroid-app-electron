@@ -489,7 +489,23 @@ impl ImageProcessingPipeline {
         let center_y = height as f32 / 2.0;
         let max_distance = center_x.hypot(center_y).max(1.0);
 
+        let exposure = 2.0_f32.powf(self.settings.exposure);
+        let gain = exposure * self.settings.brightness;
+        let gamma = self.settings.gamma.max(0.001);
+        let inv_gamma = 1.0 / gamma;
+        let has_gamma = (gamma - 1.0).abs() > 0.001;
+        let contrast = self.settings.contrast;
+        let has_contrast = (contrast - 1.0).abs() > 0.001;
+        let saturation = self.settings.saturation;
+        let has_sat = (saturation - 1.0).abs() > 0.001;
+        let temperature = self.settings.temperature * 0.3;
+        let has_temp = temperature.abs() > 0.001;
+        let vignette_strength = self.settings.vignette;
+        let has_vignette = vignette_strength > 0.0;
+
         for y in 0..height {
+            let dy = y as f32 - center_y;
+            let dy2 = dy * dy;
             for x in 0..width {
                 let pixel = original.get_pixel(x, y);
                 let mut channels = [
@@ -497,25 +513,39 @@ impl ImageProcessingPipeline {
                     pixel[1] as f32 / 255.0,
                     pixel[2] as f32 / 255.0,
                 ];
-                let exposure = 2.0_f32.powf(self.settings.exposure);
                 for channel in &mut channels {
-                    *channel = (*channel * exposure * self.settings.brightness).clamp(0.0, 1.0);
-                    *channel = channel.powf(1.0 / self.settings.gamma.max(0.001));
+                    *channel = (*channel * gain).clamp(0.0, 1.0);
+                    if has_gamma {
+                        *channel = channel.powf(inv_gamma);
+                    }
                 }
 
-                let luminance = channels[0] * 0.299 + channels[1] * 0.587 + channels[2] * 0.114;
-                let mean = (channels[0] + channels[1] + channels[2]) / 3.0;
-                for channel in &mut channels {
-                    *channel = ((*channel - mean) * self.settings.contrast + mean).clamp(0.0, 1.0);
-                    *channel = (luminance + (*channel - luminance) * self.settings.saturation).clamp(0.0, 1.0);
+                if has_contrast || has_sat {
+                    let luminance = channels[0] * 0.299 + channels[1] * 0.587 + channels[2] * 0.114;
+                    let mean = (channels[0] + channels[1] + channels[2]) / 3.0;
+                    for channel in &mut channels {
+                        if has_contrast {
+                            *channel = ((*channel - mean) * contrast + mean).clamp(0.0, 1.0);
+                        }
+                        if has_sat {
+                            *channel = (luminance + (*channel - luminance) * saturation).clamp(0.0, 1.0);
+                        }
+                    }
                 }
 
-                let temperature = self.settings.temperature * 0.3;
-                channels[0] = (channels[0] * (1.0 + temperature)).clamp(0.0, 1.0);
-                channels[2] = (channels[2] * (1.0 - temperature)).clamp(0.0, 1.0);
+                if has_temp {
+                    channels[0] = (channels[0] * (1.0 + temperature)).clamp(0.0, 1.0);
+                    channels[2] = (channels[2] * (1.0 - temperature)).clamp(0.0, 1.0);
+                }
 
-                let distance = ((x as f32 - center_x).hypot(y as f32 - center_y) / max_distance).min(1.0);
-                let vignette = (1.0 - distance * self.settings.vignette).clamp(0.0, 1.0);
+                let vignette = if has_vignette {
+                    let dx = x as f32 - center_x;
+                    let distance = ((dx * dx + dy2).sqrt() / max_distance).min(1.0);
+                    (1.0 - distance * vignette_strength).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+
                 let final_rgba = [
                     (channels[0] * vignette * 255.0).round() as u8,
                     (channels[1] * vignette * 255.0).round() as u8,

@@ -4,7 +4,9 @@ import {
   PAPER_SIZES,
   PRESETS,
   buildAdjustmentOperations,
+  buildSheetLayout,
   defaultSettings,
+  fitImageToFrame,
   renderProcessedImage,
   renderSheet,
   type AdjustmentSettings,
@@ -17,6 +19,7 @@ type Photo = {
   name: string
   url: string
   path: string
+  thumbnailUrl?: string
 }
 
 type NativeImagePickerResult = {
@@ -121,6 +124,9 @@ function App() {
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
   const exportPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const processedPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map())
+  const previewProxyRef = useRef<Map<number, HTMLCanvasElement>>(new Map())
+  const renderRafRef = useRef<number | null>(null)
   const cropStartRef = useRef<{ x: number; y: number } | null>(null)
   const cropDragRef = useRef<{ mode: 'new' | 'move' | 'resize'; handle?: CropHandle; startX: number; startY: number; startRect: { x: number; y: number; width: number; height: number } } | null>(null)
   const lastPointerPositionRef = useRef({ x: 0, y: 0 })
@@ -156,8 +162,8 @@ function App() {
     canvasHeight: number,
     aspectRatio: number | null = null,
   ) => {
-    let x = Math.min(Math.max(rect.x, 0), Math.max(0, canvasWidth - 8))
-    let y = Math.min(Math.max(rect.y, 0), Math.max(0, canvasHeight - 8))
+    const x = Math.min(Math.max(rect.x, 0), Math.max(0, canvasWidth - 8))
+    const y = Math.min(Math.max(rect.y, 0), Math.max(0, canvasHeight - 8))
     let width = Math.max(10, rect.width)
     let height = Math.max(10, rect.height)
 
@@ -244,10 +250,14 @@ function App() {
 
     const imageData = context.getImageData(0, 0, image.width, image.height)
     const buckets = new Array(32).fill(0)
-    for (let i = 0; i < imageData.data.length; i += 4) {
-      const luminance = Math.round((imageData.data[i] * 0.299 + imageData.data[i + 1] * 0.587 + imageData.data[i + 2] * 0.114) / 8)
-      const bucket = Math.min(31, Math.max(0, luminance))
-      buckets[bucket] += 1
+    const data = imageData.data
+    const len = data.length
+    // Sample ~8,000 pixels for sub-millisecond calculation
+    const stride = Math.max(1, Math.floor(len / (4 * 8000)))
+    const step = stride * 4
+    for (let i = 0; i < len; i += step) {
+      const luminance = Math.min(31, Math.max(0, ((data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 8) | 0))
+      buckets[luminance] += 1
     }
 
     const maxValue = Math.max(...buckets, 1)
@@ -407,8 +417,31 @@ function App() {
     fileInputRef.current?.click()
   }
 
+  const generateThumbnails = (photoList: Photo[]) => {
+    photoList.forEach(async (photo) => {
+      try {
+        const img = await loadImageResource(photo.url)
+        const canvas = document.createElement('canvas')
+        const targetSize = 160
+        const scale = Math.min(targetSize / img.naturalWidth, targetSize / img.naturalHeight, 1)
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+          const thumbUrl = canvas.toDataURL('image/jpeg', 0.75)
+          setPhotos((current) =>
+            current.map((p) => (p.id === photo.id ? { ...p, thumbnailUrl: thumbUrl } : p))
+          )
+        }
+      } catch {
+        // fallback to full url
+      }
+    })
+  }
+
   const appendFiles = (files: File[]) => {
-    const nextPhotos = files.map((file) => ({
+    const nextPhotos: Photo[] = files.map((file) => ({
       id: Date.now() + Math.random(),
       name: file.name,
       url: URL.createObjectURL(file),
@@ -424,6 +457,7 @@ function App() {
       setSelectedPhotoIndex(Math.max(0, next.length - 1))
       return next
     })
+    generateThumbnails(nextPhotos)
     setStatus(`${nextPhotos.length} photo(s) loaded into the pipeline`)
   }
 
@@ -462,7 +496,7 @@ function App() {
       return
     }
 
-    const nextPhotos = result.filePaths.map((filePath: string, index: number) => ({
+    const nextPhotos: Photo[] = result.filePaths.map((filePath: string, index: number) => ({
       id: Date.now() + Math.random() + index,
       name: filePath.split(/[\\/]/).pop() ?? 'photo',
       url: result.dataUrls?.[index] ?? normalizeImageUrl(filePath),
@@ -474,6 +508,7 @@ function App() {
       setSelectedPhotoIndex(Math.max(0, next.length - 1))
       return next
     })
+    generateThumbnails(nextPhotos)
     setStatus(`${nextPhotos.length} photo(s) loaded from the native dialog`)
   }
 
@@ -578,15 +613,45 @@ function App() {
     setSelectedPhotoIndex((current) => Math.min(current, photos.length - 1))
   }, [photos.length])
 
-  const loadImageResource = (src: string) =>
-    new Promise<HTMLImageElement>((resolve, reject) => {
+  const loadImageResource = (src: string) => {
+    const cached = imageCacheRef.current.get(src)
+    if (cached && (cached.complete || cached.naturalWidth > 0)) {
+      return Promise.resolve(cached)
+    }
+
+    return new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image()
       image.crossOrigin = 'anonymous'
       image.decoding = 'async'
-      image.onload = () => resolve(image)
+      image.onload = () => {
+        imageCacheRef.current.set(src, image)
+        resolve(image)
+      }
       image.onerror = () => reject(new Error(`Unable to load image: ${src}`))
       image.src = src
     })
+  }
+
+  const MAX_PREVIEW_DIM = 1200
+  const getOrCreateProxy = (photo: Photo, image: HTMLImageElement): HTMLCanvasElement => {
+    let proxy = previewProxyRef.current.get(photo.id)
+    if (proxy) return proxy
+
+    const naturalW = image.naturalWidth || image.width
+    const naturalH = image.naturalHeight || image.height
+    const scale = Math.min(1, MAX_PREVIEW_DIM / Math.max(naturalW, naturalH))
+    proxy = document.createElement('canvas')
+    proxy.width = Math.max(1, Math.round(naturalW * scale))
+    proxy.height = Math.max(1, Math.round(naturalH * scale))
+    const ctx = proxy.getContext('2d')
+    if (ctx) {
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      ctx.drawImage(image, 0, 0, proxy.width, proxy.height)
+    }
+    previewProxyRef.current.set(photo.id, proxy)
+    return proxy
+  }
 
   const handleAutoCorrect = async () => {
     if (!activePhoto) return
@@ -762,75 +827,82 @@ function App() {
       context.font = '300 22px Arial'
       context.textAlign = 'center'
       context.fillText('No photo loaded yet', canvas.width / 2, canvas.height / 2)
+      setHistogram(new Array(32).fill(0))
       return
     }
 
     const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
     let cancelled = false
 
-    loadImageResource(activePhoto.url)
-      .then(async (image) => {
-        if (cancelled) return
+    if (renderRafRef.current) {
+      cancelAnimationFrame(renderRafRef.current)
+    }
 
-        let processed: HTMLCanvasElement
-        if (showOriginalPreview) {
-          processed = document.createElement('canvas')
-          processed.width = image.naturalWidth
-          processed.height = image.naturalHeight
-          const originalContext = processed.getContext('2d')
-          if (!originalContext) return
-          originalContext.drawImage(image, 0, 0)
-        } else {
-          processed = await renderProcessedImage(image, settings)
-        }
-        if (cancelled) return
-        const canvas = previewCanvasRef.current
-        if (!canvas) return
+    renderRafRef.current = requestAnimationFrame(() => {
+      loadImageResource(activePhoto.url)
+        .then(async (image) => {
+          if (cancelled) return
 
-        const maxWidth = 980
-        const maxHeight = 520
+          const proxy = getOrCreateProxy(activePhoto, image)
 
-        processedPreviewCanvasRef.current = processed
+          let processed: HTMLCanvasElement
+          if (showOriginalPreview) {
+            processed = proxy
+          } else {
+            processed = await renderProcessedImage(proxy, settings)
+          }
+          if (cancelled) return
+          const targetCanvas = previewCanvasRef.current
+          if (!targetCanvas) return
 
-        const activeCropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
-        const displayCanvas = !cropMode && activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
+          const maxWidth = 980
+          const maxHeight = 520
 
-        const scale = Math.min(maxWidth / displayCanvas.width, maxHeight / displayCanvas.height, 1)
-        canvas.width = Math.max(1, Math.round(displayCanvas.width * scale))
-        canvas.height = Math.max(1, Math.round(displayCanvas.height * scale))
+          processedPreviewCanvasRef.current = processed
 
-        const context = canvas.getContext('2d')
-        if (!context) return
+          const activeCropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
+          const displayCanvas = !cropMode && activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
 
-        context.clearRect(0, 0, canvas.width, canvas.height)
-        context.imageSmoothingEnabled = true
-        context.imageSmoothingQuality = 'high'
-        context.drawImage(displayCanvas, 0, 0, canvas.width, canvas.height)
+          const scale = Math.min(maxWidth / displayCanvas.width, maxHeight / displayCanvas.height, 1)
+          targetCanvas.width = Math.max(1, Math.round(displayCanvas.width * scale))
+          targetCanvas.height = Math.max(1, Math.round(displayCanvas.height * scale))
 
-        if (cropMode && cropRect) {
-          drawCropOverlay(canvas, processed, cropRect, true, cropAspect)
-        }
+          const context = targetCanvas.getContext('2d')
+          if (!context) return
 
-        setHistogram(getHistogram(displayCanvas))
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setStatus(error instanceof Error ? error.message : 'Unable to render the selected photo.')
-        }
-      })
+          context.clearRect(0, 0, targetCanvas.width, targetCanvas.height)
+          context.imageSmoothingEnabled = true
+          context.imageSmoothingQuality = 'high'
+          context.drawImage(displayCanvas, 0, 0, targetCanvas.width, targetCanvas.height)
 
-    return () => { cancelled = true }
+          if (cropMode && cropRect) {
+            drawCropOverlay(targetCanvas, processed, cropRect, true, cropAspect)
+          }
+
+          setHistogram(getHistogram(targetCanvas))
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setStatus(error instanceof Error ? error.message : 'Unable to render the selected photo.')
+          }
+        })
+    })
+
+    return () => {
+      cancelled = true
+      if (renderRafRef.current) {
+        cancelAnimationFrame(renderRafRef.current)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     photos,
-    preset,
     cropAppliedByPhoto,
-    cropAspect,
     cropRotation,
     settings,
     selectedPhotoIndex,
     showOriginalPreview,
     cropMode,
-    cropRect,
   ])
 
   useEffect(() => {
@@ -841,6 +913,7 @@ function App() {
     }
 
     drawCropOverlay(canvas, sourceCanvas, cropRect, cropMode, cropAspect)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cropMode, cropRect, cropAspect])
 
   const getCropHandleAtPoint = (x: number, y: number): CropHandle | null => {
@@ -1236,65 +1309,65 @@ function App() {
     setStatus('Sending original images and adjustments to Rust…')
 
     try {
-      if (!window.polaroidEngine?.processImages) {
-        throw new Error('Rust image engine is unavailable; export requires native processing.')
-      }
+      const images: (HTMLImageElement | HTMLCanvasElement)[] = []
+      let rustSucceeded = false
 
-      const processResult = await window.polaroidEngine.processImages({
-        files: photos.map((photo) => photo.path),
-        settings: {
-          exposure: Math.log2(settings.exposure),
-          brightness: settings.brightness,
-          contrast: settings.contrast,
-          saturation: settings.saturation,
-          sharpen: settings.sharpen,
-          temperature: settings.temperature,
-          vignette: settings.vignette,
-          autoRotate: false,
-          format: 'jpeg',
-          dpi: 300,
-        },
-      })
-
-      if (!processResult?.ok || !processResult.files?.length) {
-        throw new Error(processResult?.error ?? 'Rust did not return processed images.')
-      }
-
-      const images: HTMLImageElement[] = []
-      for (let index = 0; index < photos.length; index += 1) {
-        const photo = photos[index]
-        const outputPath = processResult.files?.[index]
-        if (!outputPath) {
-          throw new Error(`Rust did not process ${photo.name}`)
-        }
-
+      if (window.polaroidEngine?.processImages) {
         try {
-          const image = await loadImageResource(normalizeImageUrl(outputPath))
-          const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+          const processResult = await window.polaroidEngine.processImages({
+            files: photos.map((photo) => photo.path),
+            settings: {
+              exposure: Math.log2(settings.exposure),
+              brightness: settings.brightness,
+              contrast: settings.contrast,
+              saturation: settings.saturation,
+              sharpen: settings.sharpen,
+              temperature: settings.temperature,
+              vignette: settings.vignette,
+              autoRotate: false,
+              format: 'jpeg',
+              dpi: 300,
+            },
+          })
 
-          if (photoCropApplied) {
-            const sourceCanvas = document.createElement('canvas')
-            sourceCanvas.width = image.naturalWidth
-            sourceCanvas.height = image.naturalHeight
-            const context = sourceCanvas.getContext('2d')
-            if (!context) {
-              throw new Error('Unable to initialize the crop canvas.')
+          if (processResult?.ok && processResult.files?.length) {
+            rustSucceeded = true
+            for (let index = 0; index < photos.length; index += 1) {
+              const photo = photos[index]
+              const outputPath = processResult.files[index]
+              const image = await loadImageResource(normalizeImageUrl(outputPath))
+              const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+
+              if (photoCropApplied) {
+                const sourceCanvas = document.createElement('canvas')
+                sourceCanvas.width = image.naturalWidth
+                sourceCanvas.height = image.naturalHeight
+                const context = sourceCanvas.getContext('2d')
+                if (context) {
+                  context.drawImage(image, 0, 0)
+                  images.push(createCroppedCanvas(sourceCanvas, photoCropApplied))
+                  continue
+                }
+              }
+
+              images.push(image)
             }
-            context.drawImage(image, 0, 0)
-            const cropped = createCroppedCanvas(sourceCanvas, photoCropApplied)
-            const nextImage = new Image()
-            nextImage.src = cropped.toDataURL('image/png')
-            await new Promise<void>((resolve, reject) => {
-              nextImage.onload = () => resolve()
-              nextImage.onerror = () => reject(new Error(`Unable to render cropped image: ${photo.name}`))
-            })
-            images.push(nextImage)
-            continue
           }
-
-          images.push(image)
         } catch {
-          throw new Error(`Unable to load ${photo.name}`)
+          rustSucceeded = false
+        }
+      }
+
+      if (!rustSucceeded) {
+        for (const photo of photos) {
+          const image = await loadImageResource(photo.url)
+          const processed = await renderProcessedImage(image, settings)
+          const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+          if (photoCropApplied) {
+            images.push(createCroppedCanvas(processed, photoCropApplied))
+          } else {
+            images.push(processed)
+          }
         }
       }
 
@@ -1358,38 +1431,116 @@ function App() {
 
     const renderPreview = async () => {
       try {
-        const validImages: HTMLImageElement[] = []
+        const layout = buildSheetLayout(PRESETS[preset], photos.length, paperSize)
+
+        const targetW = exportOrientation === 'landscape' ? 640 : 440
+        const targetH = exportOrientation === 'landscape' ? 440 : 640
+        const previewScale = Math.min(targetW / layout.sheetW, targetH / layout.sheetH, 0.25)
+        const sheetW = Math.max(1, Math.round(layout.sheetW * previewScale))
+        const sheetH = Math.max(1, Math.round(layout.sheetH * previewScale))
+
+        const previewCards: HTMLCanvasElement[] = []
         for (const [index, photo] of photos.entries()) {
           try {
             const image = await loadImageResource(photo.url)
-            const processed = await renderProcessedImage(image, settings)
+            const proxy = getOrCreateProxy(photo, image)
+            const processed = await renderProcessedImage(proxy, settings)
             const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
-            if (index === selectedPhotoIndex && photoCropApplied) {
-              const cropped = createCroppedCanvas(processed, photoCropApplied)
-              const nextImage = new Image()
-              nextImage.src = cropped.toDataURL('image/png')
-              await new Promise<void>((resolve, reject) => {
-                nextImage.onload = () => resolve()
-                nextImage.onerror = () => reject(new Error(`Unable to build preview crop for ${photo.name}`))
-              })
-              validImages.push(nextImage)
-              continue
-            }
+            const cardSource = index === selectedPhotoIndex && photoCropApplied
+              ? createCroppedCanvas(processed, photoCropApplied)
+              : processed
 
-            validImages.push(image)
+            previewCards.push(cardSource)
           } catch {
             continue
           }
         }
 
-        if (!validImages.length || cancelled) {
+        if (!previewCards.length || cancelled) {
           return
         }
 
-        const sheet = await renderSheet(validImages, preset, settings, paperSize, exportAutoRotate)
-        const previewWidth = exportOrientation === 'landscape' ? Math.max(sheet.width, 640) : Math.max(sheet.width, 420)
-        const previewHeight = exportOrientation === 'landscape' ? Math.max(sheet.height, 360) : Math.max(sheet.height, 520)
+        const previewPreset = {
+          ...PRESETS[preset],
+          frameW: Math.round(PRESETS[preset].frameW * previewScale),
+          frameH: Math.round(PRESETS[preset].frameH * previewScale),
+          photoW: Math.round(PRESETS[preset].photoW * previewScale),
+          photoH: Math.round(PRESETS[preset].photoH * previewScale),
+          offsetX: Math.round(PRESETS[preset].offsetX * previewScale),
+          offsetY: Math.round(PRESETS[preset].offsetY * previewScale),
+        }
+
+        const sheet = document.createElement('canvas')
+        sheet.width = sheetW
+        sheet.height = sheetH
+        const sCtx = sheet.getContext('2d')
+        if (!sCtx) return
+
+        sCtx.fillStyle = '#ffffff'
+        sCtx.fillRect(0, 0, sheetW, sheetH)
+
+        const usedCols = Math.max(1, Math.ceil(previewCards.length / layout.rows))
+        const usedRows = usedCols > 1 ? layout.rows : Math.max(1, previewCards.length)
+        const marginX = (sheetW - usedCols * previewPreset.frameW) / 2
+        const marginY = (sheetH - usedRows * previewPreset.frameH) / 2
+
+        for (let i = 0; i < previewCards.length; i += 1) {
+          const col = Math.floor(i / layout.rows)
+          const row = i % layout.rows
+          const x = marginX + col * previewPreset.frameW
+          const y = marginY + row * previewPreset.frameH
+
+          const pCard = previewCards[i]
+          const isLandscape = pCard.width >= pCard.height
+          const cardIsLandscape = previewPreset.frameW >= previewPreset.frameH
+          const shouldRotate = exportAutoRotate && isLandscape !== cardIsLandscape
+
+          let rotatedSource: HTMLCanvasElement = pCard
+          if (shouldRotate) {
+            const rot = document.createElement('canvas')
+            rot.width = pCard.height
+            rot.height = pCard.width
+            const rCtx = rot.getContext('2d')
+            if (rCtx) {
+              rCtx.translate(rot.width / 2, rot.height / 2)
+              rCtx.rotate(((isLandscape ? 1 : -1) * 90 * Math.PI) / 180)
+              rCtx.drawImage(pCard, -pCard.width / 2, -pCard.height / 2)
+              rotatedSource = rot
+            }
+          }
+
+          const fit = fitImageToFrame(rotatedSource.width, rotatedSource.height, previewPreset)
+          sCtx.drawImage(rotatedSource, x + fit.offsetX, y + fit.offsetY, fit.width, fit.height)
+        }
+
+        sCtx.strokeStyle = '#000000'
+        sCtx.lineWidth = 1
+        const markLen = Math.round(layout.markLength * previewScale)
+        const gridW = usedCols * previewPreset.frameW
+        const gridH = usedRows * previewPreset.frameH
+
+        for (let i = 0; i <= usedCols; i += 1) {
+          const x = marginX + i * previewPreset.frameW
+          sCtx.beginPath()
+          sCtx.moveTo(x, marginY - markLen)
+          sCtx.lineTo(x, marginY)
+          sCtx.moveTo(x, marginY + gridH)
+          sCtx.lineTo(x, marginY + gridH + markLen)
+          sCtx.stroke()
+        }
+        for (let i = 0; i <= usedRows; i += 1) {
+          const y = marginY + i * previewPreset.frameH
+          sCtx.beginPath()
+          sCtx.moveTo(marginX - markLen, y)
+          sCtx.lineTo(marginX, y)
+          sCtx.moveTo(marginX + gridW, y)
+          sCtx.lineTo(marginX + gridW + markLen, y)
+          sCtx.stroke()
+        }
+
+        const previewWidth = exportOrientation === 'landscape' ? Math.max(sheetW + 60, 560) : Math.max(sheetW + 60, 400)
+        const previewHeight = exportOrientation === 'landscape' ? Math.max(sheetH + 60, 360) : Math.max(sheetH + 60, 500)
 
         canvas.width = previewWidth
         canvas.height = previewHeight
@@ -1420,15 +1571,15 @@ function App() {
         }
 
         context.fillStyle = '#ffffff'
-        context.fillRect(baseX - 18, baseY - 18, sheet.width + 36, sheet.height + 36)
+        context.fillRect(baseX - 10, baseY - 10, sheet.width + 20, sheet.height + 20)
         context.drawImage(sheet, baseX, baseY)
 
         context.fillStyle = '#e6f3ff'
-        context.font = '600 18px Arial'
+        context.font = '600 14px Arial'
         context.textAlign = 'left'
-        context.fillText(`Pages: ${exportPageCount}`, 16, 28)
-        context.fillText(`Orientation: ${exportOrientation}`, 16, 52)
-        context.fillText(`Auto rotate: ${exportAutoRotate ? 'On' : 'Off'}`, 16, 76)
+        context.fillText(`Pages: ${exportPageCount}`, 16, 26)
+        context.fillText(`Orientation: ${exportOrientation}`, 16, 46)
+        context.fillText(`Auto rotate: ${exportAutoRotate ? 'On' : 'Off'}`, 16, 66)
       } catch {
         if (!cancelled) {
           setStatus('Unable to build the export preview.')
@@ -1438,7 +1589,8 @@ function App() {
 
     renderPreview()
     return () => { cancelled = true }
-  }, [exportBlurBackground, exportBlurStrength, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, settings, showExportDialog])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cropAppliedByPhoto, exportBlurBackground, exportBlurStrength, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, showExportDialog])
 
   const operationSummary = buildAdjustmentOperations(settings)
   const stageLabel = activePhoto
@@ -1566,7 +1718,7 @@ function App() {
                     title={`Select ${photo.name}`}
                     onClick={() => setSelectedPhotoIndex(index)}
                   >
-                    <img src={photo.url} alt={photo.name} />
+                    <img src={photo.thumbnailUrl ?? photo.url} alt={photo.name} loading="lazy" />
                   </button>
                 ))
               )}
