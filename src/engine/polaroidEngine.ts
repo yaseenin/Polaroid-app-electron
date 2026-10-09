@@ -5,14 +5,37 @@ export type AdjustmentSettings = {
   exposure: number
   brightness: number
   contrast: number
+  levelsBlack: number
+  levelsMid: number
+  levelsWhite: number
+  highlights: number
+  shadows: number
   saturation: number
+  vibrance: number
+  hue: number
   sharpen: number
+  noiseReduction: number
   temperature: number
   vignette: number
 }
 
 export type AdjustmentOperation = {
-  type: 'exposure' | 'brightness' | 'contrast' | 'saturation' | 'sharpen' | 'temperature' | 'vignette'
+  type:
+    | 'exposure'
+    | 'brightness'
+    | 'contrast'
+    | 'levelsBlack'
+    | 'levelsMid'
+    | 'levelsWhite'
+    | 'highlights'
+    | 'shadows'
+    | 'saturation'
+    | 'vibrance'
+    | 'hue'
+    | 'sharpen'
+    | 'noiseReduction'
+    | 'temperature'
+    | 'vignette'
   value: number
 }
 
@@ -31,8 +54,16 @@ export const defaultSettings: AdjustmentSettings = {
   exposure: 1,
   brightness: 1,
   contrast: 1,
+  levelsBlack: 0,
+  levelsMid: 1,
+  levelsWhite: 1,
+  highlights: 1,
+  shadows: 0,
   saturation: 1,
+  vibrance: 1,
+  hue: 0,
   sharpen: 0,
+  noiseReduction: 0,
   temperature: 0,
   vignette: 0,
 }
@@ -79,27 +110,21 @@ export const PAPER_SIZES: Record<PaperSizeKey, { label: string; width: number; h
 export function buildAdjustmentOperations(settings: AdjustmentSettings): AdjustmentOperation[] {
   const operations: AdjustmentOperation[] = []
 
-  if (settings.exposure !== 1) {
-    operations.push({ type: 'exposure', value: settings.exposure })
-  }
-  if (settings.brightness !== 1) {
-    operations.push({ type: 'brightness', value: settings.brightness })
-  }
-  if (settings.contrast !== 1) {
-    operations.push({ type: 'contrast', value: settings.contrast })
-  }
-  if (settings.saturation !== 1) {
-    operations.push({ type: 'saturation', value: settings.saturation })
-  }
-  if (settings.temperature !== 0) {
-    operations.push({ type: 'temperature', value: settings.temperature })
-  }
-  if (settings.sharpen > 0) {
-    operations.push({ type: 'sharpen', value: settings.sharpen })
-  }
-  if (settings.vignette > 0) {
-    operations.push({ type: 'vignette', value: settings.vignette })
-  }
+  if (settings.exposure !== 1) operations.push({ type: 'exposure', value: settings.exposure })
+  if (settings.brightness !== 1) operations.push({ type: 'brightness', value: settings.brightness })
+  if (settings.contrast !== 1) operations.push({ type: 'contrast', value: settings.contrast })
+  if (settings.levelsBlack !== 0) operations.push({ type: 'levelsBlack', value: settings.levelsBlack })
+  if (settings.levelsMid !== 1) operations.push({ type: 'levelsMid', value: settings.levelsMid })
+  if (settings.levelsWhite !== 1) operations.push({ type: 'levelsWhite', value: settings.levelsWhite })
+  if (settings.highlights !== 1) operations.push({ type: 'highlights', value: settings.highlights })
+  if (settings.shadows !== 0) operations.push({ type: 'shadows', value: settings.shadows })
+  if (settings.saturation !== 1) operations.push({ type: 'saturation', value: settings.saturation })
+  if (settings.vibrance !== 1) operations.push({ type: 'vibrance', value: settings.vibrance })
+  if (settings.hue !== 0) operations.push({ type: 'hue', value: settings.hue })
+  if (settings.temperature !== 0) operations.push({ type: 'temperature', value: settings.temperature })
+  if (settings.sharpen > 0) operations.push({ type: 'sharpen', value: settings.sharpen })
+  if (settings.noiseReduction > 0) operations.push({ type: 'noiseReduction', value: settings.noiseReduction })
+  if (settings.vignette > 0) operations.push({ type: 'vignette', value: settings.vignette })
 
   return operations
 }
@@ -205,6 +230,54 @@ const rgba = (source: Uint8ClampedArray, i: number) => ({
   a: source[i + 3] / 255,
 })
 
+const applyToneLevels = (value: number, black: number, mid: number, white: number) => {
+  const lower = Math.min(black, white)
+  const upper = Math.max(black, white)
+  const safeRange = Math.max(0.0001, upper - lower)
+  const normalized = clamp01((value - lower) / safeRange)
+  const gamma = Math.max(0.05, mid)
+  return clamp01(Math.pow(normalized, 1 / gamma))
+}
+
+const rgbToHsl = (r: number, g: number, b: number) => {
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  let hue = 0
+  const lightness = (max + min) / 2
+  const saturation = delta === 0 ? 0 : delta / (1 - Math.abs(2 * lightness - 1))
+
+  if (delta !== 0) {
+    if (max === r) hue = ((g - b) / delta) % 6
+    else if (max === g) hue = (b - r) / delta + 2
+    else hue = (r - g) / delta + 4
+    hue *= 60
+  }
+
+  if (hue < 0) hue += 360
+
+  return { h: hue, s: saturation, l: lightness }
+}
+
+const hslToRgb = (h: number, s: number, l: number) => {
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = l - c / 2
+
+  let r = 0
+  let g = 0
+  let b = 0
+
+  if (h >= 0 && h < 60) [r, g, b] = [c, x, 0]
+  else if (h >= 60 && h < 120) [r, g, b] = [x, c, 0]
+  else if (h >= 120 && h < 180) [r, g, b] = [0, c, x]
+  else if (h >= 180 && h < 240) [r, g, b] = [0, x, c]
+  else if (h >= 240 && h < 300) [r, g, b] = [x, 0, c]
+  else [r, g, b] = [c, 0, x]
+
+  return { r: r + m, g: g + m, b: b + m }
+}
+
 function applyProcessingToPixels(source: Uint8ClampedArray, width: number, height: number, settings: AdjustmentSettings) {
   const data = new Float32Array(source.length)
 
@@ -236,9 +309,50 @@ function applyProcessingToPixels(source: Uint8ClampedArray, width: number, heigh
     g = clamp01((g - mean) * settings.contrast + mean)
     b = clamp01((b - mean) * settings.contrast + mean)
 
-    r = clamp01(luminance + (r - luminance) * settings.saturation)
-    g = clamp01(luminance + (g - luminance) * settings.saturation)
-    b = clamp01(luminance + (b - luminance) * settings.saturation)
+    r = applyToneLevels(r, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
+    g = applyToneLevels(g, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
+    b = applyToneLevels(b, settings.levelsBlack, settings.levelsMid, settings.levelsWhite)
+
+    const highlightStrength = settings.highlights
+    if (highlightStrength !== 1) {
+      const highlightAmount = highlightStrength - 1
+      const tone = clamp01((r + g + b) / 3)
+      const highlightLift = Math.max(0, tone - 0.5) * 2
+      const intensity = Math.abs(highlightAmount) * 0.9
+      if (highlightAmount > 0) {
+        r = clamp01(r + (1 - r) * intensity * highlightLift)
+        g = clamp01(g + (1 - g) * intensity * highlightLift)
+        b = clamp01(b + (1 - b) * intensity * highlightLift)
+      } else {
+        r = clamp01(r - r * intensity * highlightLift)
+        g = clamp01(g - g * intensity * highlightLift)
+        b = clamp01(b - b * intensity * highlightLift)
+      }
+    }
+
+    if (settings.shadows > 0) {
+      const shadowAmount = settings.shadows * 0.8
+      const shadowTone = 1 - ((r + g + b) / 3)
+      const darken = Math.max(0, shadowTone)
+      r = clamp01(r * (1 - shadowAmount * darken))
+      g = clamp01(g * (1 - shadowAmount * darken))
+      b = clamp01(b * (1 - shadowAmount * darken))
+    }
+
+    const vibranceFactor = 1 + (settings.vibrance - 1) * 0.9
+    const saturationFactor = settings.saturation * vibranceFactor
+    r = clamp01(luminance + (r - luminance) * saturationFactor)
+    g = clamp01(luminance + (g - luminance) * saturationFactor)
+    b = clamp01(luminance + (b - luminance) * saturationFactor)
+
+    if (settings.hue !== 0) {
+      const { h, s, l } = rgbToHsl(r, g, b)
+      const rotatedHue = (h + settings.hue * 360 + 360) % 360
+      const { r: hueR, g: hueG, b: hueB } = hslToRgb(rotatedHue, s, l)
+      r = clamp01(hueR)
+      g = clamp01(hueG)
+      b = clamp01(hueB)
+    }
 
     const temperatureAmount = settings.temperature * 0.3
     r = clamp01(r * (1 + temperatureAmount))
@@ -248,6 +362,39 @@ function applyProcessingToPixels(source: Uint8ClampedArray, width: number, heigh
     data[index + 1] = g
     data[index + 2] = b
     data[index + 3] = data[index + 3]
+  }
+
+  if (settings.noiseReduction > 0) {
+    const temp = new Float32Array(data)
+    const strength = clamp01(settings.noiseReduction / 2)
+
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = (y * width + x) * 4
+        let sumR = 0
+        let sumG = 0
+        let sumB = 0
+        let samples = 0
+
+        for (let yy = y - 1; yy <= y + 1; yy += 1) {
+          for (let xx = x - 1; xx <= x + 1; xx += 1) {
+            const neighborIndex = (yy * width + xx) * 4
+            sumR += temp[neighborIndex]
+            sumG += temp[neighborIndex + 1]
+            sumB += temp[neighborIndex + 2]
+            samples += 1
+          }
+        }
+
+        const averageR = sumR / samples
+        const averageG = sumG / samples
+        const averageB = sumB / samples
+
+        data[index] = clamp01(temp[index] * (1 - strength) + averageR * strength)
+        data[index + 1] = clamp01(temp[index + 1] * (1 - strength) + averageG * strength)
+        data[index + 2] = clamp01(temp[index + 2] * (1 - strength) + averageB * strength)
+      }
+    }
   }
 
   if (settings.sharpen > 0) {

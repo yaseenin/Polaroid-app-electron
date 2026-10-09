@@ -205,6 +205,8 @@ function App() {
     }
 
     context.clearRect(0, 0, targetCanvas.width, targetCanvas.height)
+    context.imageSmoothingEnabled = true
+    context.imageSmoothingQuality = 'high'
     context.drawImage(sourceCanvas, 0, 0, targetCanvas.width, targetCanvas.height)
 
     if (!enabled || !rect) {
@@ -644,7 +646,16 @@ function App() {
         exposure: Math.min(1.25, Math.max(1, 0.5 / Math.max(0.05, whiteBalancedLuminance))),
         brightness: 1,
         contrast: Math.min(1.35, Math.max(0.8, 0.82 / range)),
+        levelsBlack: 0,
+        levelsMid: 1,
+        levelsWhite: 1,
+        highlights: 1,
+        shadows: 0,
         saturation: Math.min(1.2, Math.max(0.95, 1.08 + (0.14 - averageChroma) * 0.2)),
+        vibrance: 1,
+        hue: 0,
+        sharpen: 0,
+        noiseReduction: 0,
         temperature,
         vignette: 0,
       }
@@ -690,11 +701,14 @@ function App() {
     croppedCanvas.width = pixelRect.width
     croppedCanvas.height = pixelRect.height
 
-    const context = croppedCanvas.getContext('2d')
+    const context = croppedCanvas.getContext('2d', { alpha: false })
     if (!context) {
       return sourceCanvas
     }
 
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, croppedCanvas.width, croppedCanvas.height)
+    context.imageSmoothingEnabled = true
     context.drawImage(
       sourceCanvas,
       pixelRect.x,
@@ -718,30 +732,18 @@ function App() {
     rotatedCanvas.width = Math.ceil(baseWidth * Math.abs(Math.cos(rotation)) + baseHeight * Math.abs(Math.sin(rotation)))
     rotatedCanvas.height = Math.ceil(baseWidth * Math.abs(Math.sin(rotation)) + baseHeight * Math.abs(Math.cos(rotation)))
 
-    const rotatedContext = rotatedCanvas.getContext('2d')
+    const rotatedContext = rotatedCanvas.getContext('2d', { alpha: false })
     if (!rotatedContext) {
       return croppedCanvas
     }
 
+    rotatedContext.fillStyle = '#ffffff'
+    rotatedContext.fillRect(0, 0, rotatedCanvas.width, rotatedCanvas.height)
     rotatedContext.translate(rotatedCanvas.width / 2, rotatedCanvas.height / 2)
     rotatedContext.rotate(rotation)
+    rotatedContext.imageSmoothingEnabled = true
     rotatedContext.drawImage(croppedCanvas, -baseWidth / 2, -baseHeight / 2)
     return rotatedCanvas
-  }
-
-  const drawCroppedPreview = (
-    context: CanvasRenderingContext2D,
-    image: HTMLCanvasElement,
-    targetWidth: number,
-    targetHeight: number,
-  ) => {
-    const scale = Math.min(targetWidth / image.width, targetHeight / image.height)
-    const drawWidth = image.width * scale
-    const drawHeight = image.height * scale
-    const offsetX = (targetWidth - drawWidth) / 2
-    const offsetY = (targetHeight - drawHeight) / 2
-    context.clearRect(0, 0, targetWidth, targetHeight)
-    context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight)
   }
 
   useEffect(() => {
@@ -787,23 +789,23 @@ function App() {
 
         const maxWidth = 980
         const maxHeight = 520
-        const scale = Math.min(maxWidth / processed.width, maxHeight / processed.height, 1)
-        canvas.width = Math.max(1, Math.round(processed.width * scale))
-        canvas.height = Math.max(1, Math.round(processed.height * scale))
-        const context = canvas.getContext('2d')
-        if (!context) return
 
         processedPreviewCanvasRef.current = processed
 
-        const activeCropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? cropApplied : cropApplied
-        const displayCanvas = activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
+        const activeCropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
+        const displayCanvas = !cropMode && activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
 
-        if (displayCanvas !== processed) {
-          drawCroppedPreview(context, displayCanvas, canvas.width, canvas.height)
-        } else {
-          context.clearRect(0, 0, canvas.width, canvas.height)
-          context.drawImage(processed, 0, 0, processed.width, processed.height, 0, 0, canvas.width, canvas.height)
-        }
+        const scale = Math.min(maxWidth / displayCanvas.width, maxHeight / displayCanvas.height, 1)
+        canvas.width = Math.max(1, Math.round(displayCanvas.width * scale))
+        canvas.height = Math.max(1, Math.round(displayCanvas.height * scale))
+
+        const context = canvas.getContext('2d')
+        if (!context) return
+
+        context.clearRect(0, 0, canvas.width, canvas.height)
+        context.imageSmoothingEnabled = true
+        context.imageSmoothingQuality = 'high'
+        context.drawImage(displayCanvas, 0, 0, canvas.width, canvas.height)
 
         if (cropMode && cropRect) {
           drawCropOverlay(canvas, processed, cropRect, true, cropAspect)
@@ -818,7 +820,18 @@ function App() {
       })
 
     return () => { cancelled = true }
-  }, [photos, preset, cropApplied, cropAspect, cropRotation, settings, selectedPhotoIndex, showOriginalPreview])
+  }, [
+    photos,
+    preset,
+    cropAppliedByPhoto,
+    cropAspect,
+    cropRotation,
+    settings,
+    selectedPhotoIndex,
+    showOriginalPreview,
+    cropMode,
+    cropRect,
+  ])
 
   useEffect(() => {
     const canvas = previewCanvasRef.current
@@ -1094,6 +1107,18 @@ function App() {
       return
     }
 
+    const rectIsUnchanged =
+      cropRect &&
+      Math.abs(nextRect.x - cropRect.x) < 0.5 &&
+      Math.abs(nextRect.y - cropRect.y) < 0.5 &&
+      Math.abs(nextRect.width - cropRect.width) < 0.5 &&
+      Math.abs(nextRect.height - cropRect.height) < 0.5
+
+    if (rectIsUnchanged) {
+      setCropCursor(getCropCursorAtPoint(x, y))
+      return
+    }
+
     setCropRect(nextRect)
     if (activePhoto) {
       setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: nextRect }))
@@ -1235,41 +1260,43 @@ function App() {
         throw new Error(processResult?.error ?? 'Rust did not return processed images.')
       }
 
-      const images = await Promise.all(
-        photos.map(async (photo, index) => {
-          try {
-            const outputPath = processResult.files?.[index]
-            if (!outputPath) {
-              throw new Error(`Rust did not process ${photo.name}`)
-            }
-            const image = await loadImageResource(normalizeImageUrl(outputPath))
-            const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+      const images: HTMLImageElement[] = []
+      for (let index = 0; index < photos.length; index += 1) {
+        const photo = photos[index]
+        const outputPath = processResult.files?.[index]
+        if (!outputPath) {
+          throw new Error(`Rust did not process ${photo.name}`)
+        }
 
-            if (photoCropApplied) {
-              const sourceCanvas = document.createElement('canvas')
-              sourceCanvas.width = image.naturalWidth
-              sourceCanvas.height = image.naturalHeight
-              const context = sourceCanvas.getContext('2d')
-              if (!context) {
-                throw new Error('Unable to initialize the crop canvas.')
-              }
-              context.drawImage(image, 0, 0)
-              const cropped = createCroppedCanvas(sourceCanvas, photoCropApplied)
-              const nextImage = new Image()
-              nextImage.src = cropped.toDataURL('image/png')
-              await new Promise<void>((resolve, reject) => {
-                nextImage.onload = () => resolve()
-                nextImage.onerror = () => reject(new Error(`Unable to render cropped image: ${photo.name}`))
-              })
-              return nextImage
-            }
+        try {
+          const image = await loadImageResource(normalizeImageUrl(outputPath))
+          const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
-            return image
-          } catch {
-            throw new Error(`Unable to load ${photo.name}`)
+          if (photoCropApplied) {
+            const sourceCanvas = document.createElement('canvas')
+            sourceCanvas.width = image.naturalWidth
+            sourceCanvas.height = image.naturalHeight
+            const context = sourceCanvas.getContext('2d')
+            if (!context) {
+              throw new Error('Unable to initialize the crop canvas.')
+            }
+            context.drawImage(image, 0, 0)
+            const cropped = createCroppedCanvas(sourceCanvas, photoCropApplied)
+            const nextImage = new Image()
+            nextImage.src = cropped.toDataURL('image/png')
+            await new Promise<void>((resolve, reject) => {
+              nextImage.onload = () => resolve()
+              nextImage.onerror = () => reject(new Error(`Unable to render cropped image: ${photo.name}`))
+            })
+            images.push(nextImage)
+            continue
           }
-        }),
-      )
+
+          images.push(image)
+        } catch {
+          throw new Error(`Unable to load ${photo.name}`)
+        }
+      }
 
       const sheet = await renderSheet(images, preset, defaultSettings, paperSize, exportAutoRotate)
       const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
@@ -1331,32 +1358,31 @@ function App() {
 
     const renderPreview = async () => {
       try {
-        const images = await Promise.all(
-          photos.map(async (photo, index) => {
-            try {
-              const image = await loadImageResource(photo.url)
-              const processed = await renderProcessedImage(image, settings)
-              const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+        const validImages: HTMLImageElement[] = []
+        for (const [index, photo] of photos.entries()) {
+          try {
+            const image = await loadImageResource(photo.url)
+            const processed = await renderProcessedImage(image, settings)
+            const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
-              if (index === selectedPhotoIndex && photoCropApplied) {
-                const cropped = createCroppedCanvas(processed, photoCropApplied)
-                const nextImage = new Image()
-                nextImage.src = cropped.toDataURL('image/png')
-                await new Promise<void>((resolve, reject) => {
-                  nextImage.onload = () => resolve()
-                  nextImage.onerror = () => reject(new Error(`Unable to build preview crop for ${photo.name}`))
-                })
-                return nextImage
-              }
-
-              return image
-            } catch {
-              return null
+            if (index === selectedPhotoIndex && photoCropApplied) {
+              const cropped = createCroppedCanvas(processed, photoCropApplied)
+              const nextImage = new Image()
+              nextImage.src = cropped.toDataURL('image/png')
+              await new Promise<void>((resolve, reject) => {
+                nextImage.onload = () => resolve()
+                nextImage.onerror = () => reject(new Error(`Unable to build preview crop for ${photo.name}`))
+              })
+              validImages.push(nextImage)
+              continue
             }
-          }),
-        )
 
-        const validImages = images.filter(Boolean) as HTMLImageElement[]
+            validImages.push(image)
+          } catch {
+            continue
+          }
+        }
+
         if (!validImages.length || cancelled) {
           return
         }
@@ -1591,17 +1617,17 @@ function App() {
               <SliderControl label="Exposure" value={settings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Brightness" value={settings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Contrast" value={settings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels Black" value={0} min={0} max={1} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Levels Mid" value={1.3} min={0.2} max={3} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Levels White" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Highlights" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
-              <SliderControl label="Shadows" value={0} min={0} max={2} step={0.01} onChange={() => undefined} />
+              <SliderControl label="Levels Black" value={settings.levelsBlack} min={0} max={1} step={0.01} onChange={(value) => updateSetting('levelsBlack', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Levels Mid" value={settings.levelsMid} min={0.2} max={3} step={0.01} onChange={(value) => updateSetting('levelsMid', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Levels White" value={settings.levelsWhite} min={0} max={2} step={0.01} onChange={(value) => updateSetting('levelsWhite', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Highlights" value={settings.highlights} min={0} max={2} step={0.01} onChange={(value) => updateSetting('highlights', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Shadows" value={settings.shadows} min={0} max={2} step={0.01} onChange={(value) => updateSetting('shadows', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Temperature" value={settings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Vibrance" value={1} min={0} max={2} step={0.01} onChange={() => undefined} />
+              <SliderControl label="Vibrance" value={settings.vibrance} min={0} max={2} step={0.01} onChange={(value) => updateSetting('vibrance', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Saturation" value={settings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Hue" value={0} min={-1} max={1} step={0.01} onChange={() => undefined} />
+              <SliderControl label="Hue" value={settings.hue} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('hue', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Sharpness" value={settings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Noise Reduction" value={0} min={0} max={1} step={0.01} onChange={() => undefined} />
+              <SliderControl label="Noise Reduction" value={settings.noiseReduction} min={0} max={1} step={0.01} onChange={(value) => updateSetting('noiseReduction', value)} onInteractionStart={recordHistory} />
               <SliderControl label="Vignette" value={settings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} onInteractionStart={recordHistory} />
             </div>
           </aside>
