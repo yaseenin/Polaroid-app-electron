@@ -17,25 +17,26 @@ export type AdjustmentSettings = {
   noiseReduction: number
   temperature: number
   vignette: number
+  fillBlur?: boolean
 }
 
 export type AdjustmentOperation = {
   type:
-    | 'exposure'
-    | 'brightness'
-    | 'contrast'
-    | 'levelsBlack'
-    | 'levelsMid'
-    | 'levelsWhite'
-    | 'highlights'
-    | 'shadows'
-    | 'saturation'
-    | 'vibrance'
-    | 'hue'
-    | 'sharpen'
-    | 'noiseReduction'
-    | 'temperature'
-    | 'vignette'
+  | 'exposure'
+  | 'brightness'
+  | 'contrast'
+  | 'levelsBlack'
+  | 'levelsMid'
+  | 'levelsWhite'
+  | 'highlights'
+  | 'shadows'
+  | 'saturation'
+  | 'vibrance'
+  | 'hue'
+  | 'sharpen'
+  | 'noiseReduction'
+  | 'temperature'
+  | 'vignette'
   value: number
 }
 
@@ -66,6 +67,7 @@ export const defaultSettings: AdjustmentSettings = {
   noiseReduction: 0,
   temperature: 0,
   vignette: 0,
+  fillBlur: false,
 }
 
 export const PRESETS: Record<PresetKey, PresetDefinition> = {
@@ -258,7 +260,7 @@ const hslToRgb = (h: number, s: number, l: number) => {
   else if (h >= 120 && h < 180) [r, g, b] = [0, c, x]
   else if (h >= 180 && h < 240) [r, g, b] = [0, x, c]
   else if (h >= 240 && h < 300) [r, g, b] = [x, 0, c]
-  else [r, g, b] = [c, 0, x]
+  else[r, g, b] = [c, 0, x]
 
   return { r: r + m, g: g + m, b: b + m }
 }
@@ -580,6 +582,19 @@ export async function renderPolaroidCard(
   const y = fit.offsetY
 
   context.clearRect(0, 0, preset.frameW, preset.frameH)
+
+  if (settings.fillBlur) {
+    context.save()
+    context.beginPath()
+    context.rect(preset.offsetX, preset.offsetY, preset.photoW, preset.photoH)
+    context.clip()
+
+    context.filter = 'blur(20px)'
+    // To mimic img.resize((PHOTO_W, PHOTO_H))
+    context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, preset.offsetX - 20, preset.offsetY - 20, preset.photoW + 40, preset.photoH + 40)
+    context.restore()
+  }
+
   context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, x, y, fit.width, fit.height)
 
   return cardCanvas

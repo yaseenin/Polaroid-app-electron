@@ -1795,6 +1795,11 @@ function App() {
                   <input title="Auto rotate images" type="checkbox" checked={exportAutoRotate} onChange={(event) => setExportAutoRotate(event.target.checked)} />
                 </div>
 
+                <div className="toggle-row">
+                  <label>Fill background with blur</label>
+                  <input title="Fill background with blurred image" type="checkbox" checked={settings.fillBlur || false} onChange={(event) => updateSetting('fillBlur', event.target.checked)} />
+                </div>
+
                 <div className="template-row compact">
                   <label>Export format</label>
                   <select title="Choose export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as 'png' | 'jpeg' | 'pdf')}>
