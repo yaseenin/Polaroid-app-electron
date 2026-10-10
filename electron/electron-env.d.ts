@@ -35,7 +35,7 @@ interface Window {
       error?: string
     }>
     saveProject: (project: unknown) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
-    saveExport: (payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
+    saveExport: (payload: { dataUrls: string[]; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
     processImages: (request: {
       files: string[]
       outputDir?: string

@@ -187,7 +187,7 @@ ipcMain.handle('save-project', async (_event, project: unknown) => {
   return { ok: true, filePath: normalizedPath }
 })
 
-ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => {
+ipcMain.handle('save-export', async (_event, payload: { dataUrls: string[]; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => {
   const format = payload.format ?? 'png'
   const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : 'png'
   const defaultName = payload.defaultName.endsWith(`.${extension}`) ? payload.defaultName : `${payload.defaultName.replace(/\.[^.]+$/, '') || 'export'}.${extension}`
@@ -203,34 +203,42 @@ ipcMain.handle('save-export', async (_event, payload: { dataUrl: string; default
   }
 
   const normalizedPath = filePath.toLowerCase().endsWith(`.${extension}`) ? filePath : `${filePath}.${extension}`
+  const dataUrls = payload.dataUrls || []
 
   if (format === 'pdf') {
-    const matches = payload.dataUrl.match(/^data:image\/(png|jpeg);base64,(.+)$/)
-    const isPng = (matches?.[1] ?? 'png') === 'png'
-    const base64 = matches ? matches[2] : payload.dataUrl.replace(/^data:image\/.*;base64,/, '')
-    const imageBytes = Buffer.from(base64, 'base64')
     const pdfDoc = await PDFDocument.create()
-    const image = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes)
     const pointsPerPixel = 72 / Math.max(1, payload.dpi ?? 300)
-    const page = pdfDoc.addPage([image.width * pointsPerPixel, image.height * pointsPerPixel])
-    const scale = Math.min(page.getWidth() / image.width, page.getHeight() / image.height)
-    const width = image.width * scale
-    const height = image.height * scale
-    page.drawImage(image, {
-      x: (page.getWidth() - width) / 2,
-      y: (page.getHeight() - height) / 2,
-      width,
-      height,
-    })
+
+    for (const dataUrl of dataUrls) {
+      const matches = dataUrl.match(/^data:image\/(png|jpeg);base64,(.+)$/)
+      const isPng = (matches?.[1] ?? 'png') === 'png'
+      const base64 = matches ? matches[2] : dataUrl.replace(/^data:image\/.*;base64,/, '')
+      const imageBytes = Buffer.from(base64, 'base64')
+      const image = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes)
+      const page = pdfDoc.addPage([image.width * pointsPerPixel, image.height * pointsPerPixel])
+      const scale = Math.min(page.getWidth() / image.width, page.getHeight() / image.height)
+      const width = image.width * scale
+      const height = image.height * scale
+      page.drawImage(image, {
+        x: (page.getWidth() - width) / 2,
+        y: (page.getHeight() - height) / 2,
+        width,
+        height,
+      })
+    }
+
     const pdfBytes = await pdfDoc.save()
     await fs.promises.writeFile(normalizedPath, pdfBytes)
     return { ok: true, filePath: normalizedPath }
   }
 
-  const matches = payload.dataUrl.match(new RegExp(`^data:image\\/(png|jpeg);base64,(.+)$`))
-  const base64 = matches ? matches[2] : payload.dataUrl.replace(/^data:image\/.*;base64,/, '')
-  const buffer = Buffer.from(base64, 'base64')
-  await fs.promises.writeFile(normalizedPath, buffer)
+  for (let i = 0; i < dataUrls.length; i++) {
+    const p = dataUrls.length === 1 ? normalizedPath : normalizedPath.replace(new RegExp(`\\.${extension}$`, 'i'), `-${i + 1}.${extension}`)
+    const matches = dataUrls[i].match(new RegExp(`^data:image\\/(png|jpeg);base64,(.+)$`))
+    const base64 = matches ? matches[2] : dataUrls[i].replace(/^data:image\/.*;base64,/, '')
+    const buffer = Buffer.from(base64, 'base64')
+    await fs.promises.writeFile(p, buffer)
+  }
 
   return { ok: true, filePath: normalizedPath }
 })

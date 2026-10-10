@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import './App.css'
 import {
   PAPER_SIZES,
@@ -46,8 +46,6 @@ type SavedProject = {
   exportPageCount: number
   exportOrientation: 'portrait' | 'landscape'
   exportAutoRotate: boolean
-  exportBlurBackground: boolean
-  exportBlurStrength: number
 }
 
 type SliderProps = {
@@ -95,8 +93,6 @@ function App() {
   const [exportPageCount, setExportPageCount] = useState(1)
   const [exportOrientation, setExportOrientation] = useState<'portrait' | 'landscape'>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
-  const [exportBlurBackground, setExportBlurBackground] = useState(true)
-  const [exportBlurStrength, setExportBlurStrength] = useState(14)
   const [settings, setSettings] = useState<AdjustmentSettings>(defaultSettings)
   const [showOriginalPreview, setShowOriginalPreview] = useState(false)
   const [status, setStatus] = useState('No photos added yet')
@@ -110,6 +106,7 @@ function App() {
   type CropHandle = 'nw' | 'ne' | 'sw' | 'se'
 
   const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportPreviewPage, setExportPreviewPage] = useState(0)
   const [cropMode, setCropMode] = useState(false)
   const [cropAspect, setCropAspect] = useState<'Free' | 'Square' | 'Mini' | 'Wide'>('Free')
   const [cropRotation, setCropRotation] = useState(0)
@@ -533,8 +530,6 @@ function App() {
       exportPageCount,
       exportOrientation,
       exportAutoRotate,
-      exportBlurBackground,
-      exportBlurStrength,
     }
 
     try {
@@ -588,8 +583,6 @@ function App() {
       setExportPageCount(project.exportPageCount ?? 1)
       setExportOrientation(project.exportOrientation ?? 'portrait')
       setExportAutoRotate(project.exportAutoRotate ?? true)
-      setExportBlurBackground(project.exportBlurBackground ?? true)
-      setExportBlurStrength(project.exportBlurStrength ?? 14)
       setCropAppliedByPhoto(restoredCrops)
       setCropRectByPhoto({})
       setCropRect(null)
@@ -1306,80 +1299,40 @@ function App() {
     }
 
     setProcessing(true)
-    setStatus('Sending original images and adjustments to Rust…')
+    setStatus('Processing images and building export sheet…')
 
     try {
       const images: (HTMLImageElement | HTMLCanvasElement)[] = []
-      let rustSucceeded = false
 
-      if (window.polaroidEngine?.processImages) {
-        try {
-          const processResult = await window.polaroidEngine.processImages({
-            files: photos.map((photo) => photo.path),
-            settings: {
-              exposure: Math.log2(settings.exposure),
-              brightness: settings.brightness,
-              contrast: settings.contrast,
-              saturation: settings.saturation,
-              sharpen: settings.sharpen,
-              temperature: settings.temperature,
-              vignette: settings.vignette,
-              autoRotate: false,
-              format: 'jpeg',
-              dpi: 300,
-            },
-          })
-
-          if (processResult?.ok && processResult.files?.length) {
-            rustSucceeded = true
-            for (let index = 0; index < photos.length; index += 1) {
-              const photo = photos[index]
-              const outputPath = processResult.files[index]
-              const image = await loadImageResource(normalizeImageUrl(outputPath))
-              const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
-
-              if (photoCropApplied) {
-                const sourceCanvas = document.createElement('canvas')
-                sourceCanvas.width = image.naturalWidth
-                sourceCanvas.height = image.naturalHeight
-                const context = sourceCanvas.getContext('2d')
-                if (context) {
-                  context.drawImage(image, 0, 0)
-                  images.push(createCroppedCanvas(sourceCanvas, photoCropApplied))
-                  continue
-                }
-              }
-
-              images.push(image)
-            }
-          }
-        } catch {
-          rustSucceeded = false
+      for (const photo of photos) {
+        const image = await loadImageResource(photo.url)
+        const processed = await renderProcessedImage(image, settings)
+        const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
+        if (photoCropApplied) {
+          images.push(createCroppedCanvas(processed, photoCropApplied))
+        } else {
+          images.push(processed)
         }
       }
 
-      if (!rustSucceeded) {
-        for (const photo of photos) {
-          const image = await loadImageResource(photo.url)
-          const processed = await renderProcessedImage(image, settings)
-          const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
-          if (photoCropApplied) {
-            images.push(createCroppedCanvas(processed, photoCropApplied))
-          } else {
-            images.push(processed)
-          }
-        }
+      const layoutInfo = buildSheetLayout(PRESETS[preset], 1, paperSize)
+      const maxImagesPerPage = layoutInfo.cols * layoutInfo.rows
+
+      const dataUrls: string[] = []
+
+      for (let i = 0; i < images.length; i += maxImagesPerPage) {
+        const chunk = images.slice(i, i + maxImagesPerPage)
+        const sheet = await renderSheet(chunk, preset, defaultSettings, paperSize, exportAutoRotate)
+        const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
+        dataUrls.push(sheet.toDataURL(mimeType))
       }
 
-      const sheet = await renderSheet(images, preset, defaultSettings, paperSize, exportAutoRotate)
-      const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
-      const dataUrl = sheet.toDataURL(mimeType)
       const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat === 'pdf' ? 'pdf' : exportFormat}`
 
       const saveResult = await window.polaroidEngine?.saveExport?.({
-        dataUrl,
-        format: exportFormat,
+        dataUrls,
         defaultName: fileName,
+        format: exportFormat,
         dpi: 300,
       })
 
@@ -1394,10 +1347,12 @@ function App() {
         return
       }
 
-      const anchor = document.createElement('a')
-      anchor.href = dataUrl
-      anchor.download = fileName
-      anchor.click()
+      dataUrls.forEach((dataUrl, idx) => {
+        const anchor = document.createElement('a')
+        anchor.href = dataUrl
+        anchor.download = dataUrls.length === 1 ? fileName : fileName.replace(/\.([^.]+)$/, `-${idx + 1}.$1`)
+        anchor.click()
+      })
       setLastOutputDir('browser-download')
       setStatus(`Browser export created: ${fileName}`)
     } catch (error) {
@@ -1414,12 +1369,20 @@ function App() {
     }
 
     setShowExportDialog(true)
+    setExportPreviewPage(0)
   }
 
   const finalizeExport = async () => {
     setShowExportDialog(false)
     await handleExportSheet()
   }
+
+  const exportMaxImagesPerPage = useMemo(() => {
+    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+    return layout.cols * layout.rows
+  }, [preset, paperSize])
+
+  const exportTotalPages = Math.max(1, Math.ceil(photos.length / exportMaxImagesPerPage))
 
   useEffect(() => {
     const canvas = exportPreviewCanvasRef.current
@@ -1431,7 +1394,12 @@ function App() {
 
     const renderPreview = async () => {
       try {
-        const layout = buildSheetLayout(PRESETS[preset], photos.length, paperSize)
+        const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+
+        const currentPage = Math.min(exportPreviewPage, Math.max(0, exportTotalPages - 1))
+        const startIndex = currentPage * exportMaxImagesPerPage
+        const endIndex = Math.min(startIndex + exportMaxImagesPerPage, photos.length)
+        const photosToRender = photos.slice(startIndex, endIndex)
 
         const targetW = exportOrientation === 'landscape' ? 640 : 440
         const targetH = exportOrientation === 'landscape' ? 440 : 640
@@ -1440,14 +1408,15 @@ function App() {
         const sheetH = Math.max(1, Math.round(layout.sheetH * previewScale))
 
         const previewCards: HTMLCanvasElement[] = []
-        for (const [index, photo] of photos.entries()) {
+        for (const [index, photo] of photosToRender.entries()) {
           try {
+            const actualIndex = startIndex + index
             const image = await loadImageResource(photo.url)
             const proxy = getOrCreateProxy(photo, image)
             const processed = await renderProcessedImage(proxy, settings)
             const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
-            const cardSource = index === selectedPhotoIndex && photoCropApplied
+            const cardSource = actualIndex === selectedPhotoIndex && photoCropApplied
               ? createCroppedCanvas(processed, photoCropApplied)
               : processed
 
@@ -1555,21 +1524,6 @@ function App() {
         const baseX = (canvas.width - sheet.width) / 2
         const baseY = (canvas.height - sheet.height) / 2
 
-        if (exportBlurBackground) {
-          const blurCanvas = document.createElement('canvas')
-          blurCanvas.width = canvas.width
-          blurCanvas.height = canvas.height
-          const blurCtx = blurCanvas.getContext('2d')
-          if (blurCtx) {
-            blurCtx.filter = `blur(${exportBlurStrength}px)`
-            blurCtx.fillStyle = '#111827'
-            blurCtx.fillRect(0, 0, blurCanvas.width, blurCanvas.height)
-            blurCtx.drawImage(sheet, baseX, baseY)
-            blurCtx.filter = 'none'
-            context.drawImage(blurCanvas, 0, 0)
-          }
-        }
-
         context.fillStyle = '#ffffff'
         context.fillRect(baseX - 10, baseY - 10, sheet.width + 20, sheet.height + 20)
         context.drawImage(sheet, baseX, baseY)
@@ -1590,7 +1544,7 @@ function App() {
     renderPreview()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cropAppliedByPhoto, exportBlurBackground, exportBlurStrength, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, showExportDialog])
+  }, [cropAppliedByPhoto, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, showExportDialog, exportPreviewPage, exportMaxImagesPerPage, exportTotalPages])
 
   const operationSummary = buildAdjustmentOperations(settings)
   const stageLabel = activePhoto
@@ -1841,16 +1795,6 @@ function App() {
                   <input title="Auto rotate images" type="checkbox" checked={exportAutoRotate} onChange={(event) => setExportAutoRotate(event.target.checked)} />
                 </div>
 
-                <div className="toggle-row">
-                  <label>Blur background to frame</label>
-                  <input title="Blur background to frame" type="checkbox" checked={exportBlurBackground} onChange={(event) => setExportBlurBackground(event.target.checked)} />
-                </div>
-
-                <div className="template-row compact">
-                  <label>Blur strength</label>
-                  <input title="Blur strength" type="range" min={0} max={30} step={1} value={exportBlurStrength} onChange={(event) => setExportBlurStrength(Number(event.target.value))} />
-                </div>
-
                 <div className="template-row compact">
                   <label>Export format</label>
                   <select title="Choose export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as 'png' | 'jpeg' | 'pdf')}>
@@ -1859,6 +1803,14 @@ function App() {
                     <option value="pdf">PDF</option>
                   </select>
                 </div>
+
+                {exportTotalPages > 1 && (
+                  <div className="export-pagination">
+                    <button type="button" onClick={() => setExportPreviewPage(p => Math.max(0, p - 1))} disabled={exportPreviewPage === 0}>Previous</button>
+                    <span>Page {exportPreviewPage + 1} of {exportTotalPages}</span>
+                    <button type="button" onClick={() => setExportPreviewPage(p => Math.min(exportTotalPages - 1, p + 1))} disabled={exportPreviewPage === exportTotalPages - 1}>Next</button>
+                  </div>
+                )}
               </div>
 
               <div className="export-preview-panel">
@@ -1870,6 +1822,16 @@ function App() {
               <button type="button" title="Cancel export" className="ghost-button" onClick={() => setShowExportDialog(false)}>Cancel</button>
               <button type="button" title="Save export" className="action-button" onClick={finalizeExport}>Save export</button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {processing ? (
+        <div className="export-dialog-backdrop">
+          <div className="processing-dialog">
+            <h3>Processing...</h3>
+            <p>{status}</p>
+            <div className="loading-spinner"></div>
           </div>
         </div>
       ) : null}
