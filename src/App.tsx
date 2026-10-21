@@ -84,6 +84,119 @@ function SliderControl({ label, value, min, max, step, onChange, onInteractionSt
   )
 }
 
+/** Photo-opening-sized card, same idea as the Python version:
+ *  1) the whole image is resized to the opening and blurred as the background,
+ *  2) the sharp, undistorted photo is centered on top of it. */
+function createBlurFillCanvas(
+  source: HTMLCanvasElement,
+  targetWidth: number,
+  targetHeight: number,
+  rotateToFit = false,
+): HTMLCanvasElement {
+  const BLUR_RADIUS = 20 // change this number for more / less blur
+
+  let foreground = source
+
+  if (rotateToFit && (source.width >= source.height) !== (targetWidth >= targetHeight)) {
+    const rotated = document.createElement('canvas')
+    rotated.width = source.height
+    rotated.height = source.width
+    const rotateContext = rotated.getContext('2d')
+    if (rotateContext) {
+      rotateContext.translate(rotated.width / 2, rotated.height / 2)
+      rotateContext.rotate(Math.PI / 2)
+      rotateContext.drawImage(source, -source.width / 2, -source.height / 2)
+      foreground = rotated
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(targetWidth))
+  canvas.height = Math.max(1, Math.round(targetHeight))
+  const context = canvas.getContext('2d')
+  if (!context) return foreground
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+
+  // Background: whole image resized to the photo opening, then blurred.
+  // It is drawn slightly oversized so the blurred edges do not fade to white.
+  const bleed = BLUR_RADIUS * 2
+  context.save()
+  if ('filter' in context) {
+    context.filter = `blur(${BLUR_RADIUS}px)`
+    context.drawImage(foreground, -bleed, -bleed, canvas.width + bleed * 2, canvas.height + bleed * 2)
+  } else {
+    // Fallback if canvas blur filters are not supported: shrink then enlarge.
+    const small = document.createElement('canvas')
+    small.width = Math.max(1, Math.round(canvas.width / BLUR_RADIUS))
+    small.height = Math.max(1, Math.round(canvas.height / BLUR_RADIUS))
+    const smallContext = small.getContext('2d')
+    if (smallContext) {
+      smallContext.imageSmoothingQuality = 'high'
+      smallContext.drawImage(foreground, 0, 0, small.width, small.height)
+      context.drawImage(small, -bleed, -bleed, canvas.width + bleed * 2, canvas.height + bleed * 2)
+    }
+  }
+  context.restore()
+
+  // Foreground: the sharp photo, fitted without distortion and centered.
+  const fitScale = Math.min(canvas.width / foreground.width, canvas.height / foreground.height)
+  const fitWidth = foreground.width * fitScale
+  const fitHeight = foreground.height * fitScale
+  context.filter = 'none'
+  context.drawImage(foreground, (canvas.width - fitWidth) / 2, (canvas.height - fitHeight) / 2, fitWidth, fitHeight)
+  return canvas
+}
+
+/** Fits a photo into a targetWidth x targetHeight canvas WITHOUT distorting it.
+ *  'contain' = whole photo visible (white bars where needed).
+ *  'cover'   = photo fills the whole opening (edges are trimmed). */
+function createFitCanvas(
+  source: HTMLCanvasElement,
+  targetWidth: number,
+  targetHeight: number,
+  rotateToFit = false,
+  mode: 'contain' | 'cover' = 'contain',
+): HTMLCanvasElement {
+  let foreground = source
+
+  if (rotateToFit && (source.width >= source.height) !== (targetWidth >= targetHeight)) {
+    const rotated = document.createElement('canvas')
+    rotated.width = source.height
+    rotated.height = source.width
+    const rotateContext = rotated.getContext('2d')
+    if (rotateContext) {
+      rotateContext.translate(rotated.width / 2, rotated.height / 2)
+      rotateContext.rotate(Math.PI / 2)
+      rotateContext.drawImage(source, -source.width / 2, -source.height / 2)
+      foreground = rotated
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(targetWidth))
+  canvas.height = Math.max(1, Math.round(targetHeight))
+  const context = canvas.getContext('2d')
+  if (!context) return foreground
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+
+  const scale =
+    mode === 'cover'
+      ? Math.max(canvas.width / foreground.width, canvas.height / foreground.height)
+      : Math.min(canvas.width / foreground.width, canvas.height / foreground.height)
+  const drawWidth = foreground.width * scale
+  const drawHeight = foreground.height * scale
+  context.drawImage(foreground, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight)
+  return canvas
+}
+
 function App() {
   const [photos, setPhotos] = useState<Photo[]>([])
   const [preset, setPreset] = useState<PresetKey>('mini')
@@ -93,7 +206,9 @@ function App() {
   const [exportPageCount, setExportPageCount] = useState(1)
   const [exportOrientation, setExportOrientation] = useState<'portrait' | 'landscape'>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
+  const [fillBlur, setFillBlur] = useState(false)
   const [settings, setSettings] = useState<AdjustmentSettings>(defaultSettings)
+  const [settingsByPhoto, setSettingsByPhoto] = useState<Record<number, AdjustmentSettings>>({})
   const [showOriginalPreview, setShowOriginalPreview] = useState(false)
   const [status, setStatus] = useState('No photos added yet')
   const [processing, setProcessing] = useState(false)
@@ -129,7 +244,10 @@ function App() {
   const lastPointerPositionRef = useRef({ x: 0, y: 0 })
   const panDragRef = useRef<{ pointerId: number; clientX: number; clientY: number; offsetX: number; offsetY: number } | null>(null)
 
-  const captureSnapshot = (): EditorSnapshot => ({ settings, cropAppliedByPhoto, cropRotation })
+  const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
+  const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? settings : settings
+
+  const captureSnapshot = (): EditorSnapshot => ({ settings: activeSettings, cropAppliedByPhoto, cropRotation })
 
   const recordHistory = () => {
     setUndoStack((current) => [...current.slice(-49), captureSnapshot()])
@@ -137,7 +255,47 @@ function App() {
   }
 
   const updateSetting = <K extends keyof AdjustmentSettings>(key: K, value: AdjustmentSettings[K]) => {
-    setSettings((current) => ({ ...current, [key]: value }))
+    const next = { ...activeSettings, [key]: value }
+    setSettings(next)
+    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: next }))
+  }
+
+  const handleResetAdjustments = () => {
+    if (!activePhoto) return
+    recordHistory()
+
+    // Explicit neutral values ensure Reset removes the import-time auto-correction
+    // rather than returning to the app's general defaults or imported settings.
+    const originalImageSettings: AdjustmentSettings = {
+      ...defaultSettings,
+      exposure: 1,
+      brightness: 1,
+      contrast: 1,
+      levelsBlack: 0,
+      levelsMid: 1,
+      levelsWhite: 1,
+      highlights: 1,
+      shadows: 1,
+      temperature: 0,
+      vibrance: 1,
+      saturation: 1,
+      hue: 0,
+      sharpen: 0,
+      noiseReduction: 0,
+      vignette: 0,
+      fillBlur: false,
+    }
+
+    setSettings(originalImageSettings)
+    setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: originalImageSettings }))
+    setStatus(`Restored original appearance for ${activePhoto.name}`)
+  }
+
+  const selectPhoto = (index: number) => {
+    const photo = photos[index]
+    if (!photo) return
+    setSelectedPhotoIndex(index)
+    setSettings(settingsByPhoto[photo.id] ?? defaultSettings)
   }
 
   const getAspectValue = (aspect: 'Free' | 'Square' | 'Mini' | 'Wide') => {
@@ -261,14 +419,13 @@ function App() {
     return buckets.map((value) => (value / maxValue) * 100)
   }
 
-  const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
-
   const handleUndo = () => {
     const previous = undoStack[undoStack.length - 1]
     if (!previous) return
     setUndoStack((current) => current.slice(0, -1))
     setRedoStack((current) => [...current, captureSnapshot()])
     setSettings(previous.settings)
+    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: previous.settings }))
     setCropAppliedByPhoto(previous.cropAppliedByPhoto)
     setCropRotation(previous.cropRotation)
     setCropRect(null)
@@ -282,6 +439,7 @@ function App() {
     setRedoStack((current) => current.slice(0, -1))
     setUndoStack((current) => [...current, captureSnapshot()])
     setSettings(next.settings)
+    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: next.settings }))
     setCropAppliedByPhoto(next.cropAppliedByPhoto)
     setCropRotation(next.cropRotation)
     setCropRect(null)
@@ -454,6 +612,9 @@ function App() {
       setSelectedPhotoIndex(Math.max(0, next.length - 1))
       return next
     })
+    const importedSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
+    setSettings(importedSettings)
+    setSettingsByPhoto((current) => ({ ...current, ...Object.fromEntries(nextPhotos.map((photo) => [photo.id, importedSettings])) }))
     generateThumbnails(nextPhotos)
     setStatus(`${nextPhotos.length} photo(s) loaded into the pipeline`)
   }
@@ -505,6 +666,9 @@ function App() {
       setSelectedPhotoIndex(Math.max(0, next.length - 1))
       return next
     })
+    const importedSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
+    setSettings(importedSettings)
+    setSettingsByPhoto((current) => ({ ...current, ...Object.fromEntries(nextPhotos.map((photo) => [photo.id, importedSettings])) }))
     generateThumbnails(nextPhotos)
     setStatus(`${nextPhotos.length} photo(s) loaded from the native dialog`)
   }
@@ -522,7 +686,7 @@ function App() {
         path: photo.path,
         cropApplied: cropAppliedByPhoto[photo.id] ?? null,
       })),
-      settings,
+      settings: activeSettings,
       preset,
       paperSize,
       selectedPhotoIndex,
@@ -576,6 +740,7 @@ function App() {
 
       setPhotos(restoredPhotos)
       setSettings(project.settings ?? defaultSettings)
+      setSettingsByPhoto(Object.fromEntries(restoredPhotos.map((photo) => [photo.id, project.settings ?? defaultSettings])))
       setPreset(project.preset ?? 'mini')
       setPaperSize(project.paperSize ?? 'A4')
       setSelectedPhotoIndex(Math.min(project.selectedPhotoIndex ?? 0, Math.max(0, restoredPhotos.length - 1)))
@@ -702,14 +867,14 @@ function App() {
         averageBlue * (1 - temperature) * 0.114
       const nextSettings = {
         exposure: Math.min(1.25, Math.max(1, 0.5 / Math.max(0.05, whiteBalancedLuminance))),
-        brightness: 1,
-        contrast: Math.min(1.35, Math.max(0.8, 0.82 / range)),
+        brightness: 1.3,
+        contrast: 1.1,
         levelsBlack: 0,
         levelsMid: 1,
         levelsWhite: 1,
         highlights: 1,
         shadows: 0,
-        saturation: Math.min(1.2, Math.max(0.95, 1.08 + (0.14 - averageChroma) * 0.2)),
+        saturation: 1.15,
         vibrance: 1,
         hue: 0,
         sharpen: 0,
@@ -719,7 +884,9 @@ function App() {
       }
 
       recordHistory()
-      setSettings((current) => ({ ...current, ...nextSettings }))
+      const correctedSettings = { ...activeSettings, ...nextSettings }
+      setSettings(correctedSettings)
+      setSettingsByPhoto((current) => ({ ...current, [photo.id]: correctedSettings }))
       setStatus(`Auto color correction applied to ${photo.name}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Auto correction failed.')
@@ -842,7 +1009,7 @@ function App() {
           if (showOriginalPreview) {
             processed = proxy
           } else {
-            processed = await renderProcessedImage(proxy, settings)
+            processed = await renderProcessedImage(proxy, settingsByPhoto[activePhoto.id] ?? settings)
           }
           if (cancelled) return
           const targetCanvas = previewCanvasRef.current
@@ -893,6 +1060,7 @@ function App() {
     cropAppliedByPhoto,
     cropRotation,
     settings,
+    settingsByPhoto,
     selectedPhotoIndex,
     showOriginalPreview,
     cropMode,
@@ -1306,13 +1474,20 @@ function App() {
 
       for (const photo of photos) {
         const image = await loadImageResource(photo.url)
-        const processed = await renderProcessedImage(image, settings)
+        const photoSettings = settingsByPhoto[photo.id] ?? settings
+        const processed = await renderProcessedImage(image, photoSettings)
         const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
-        if (photoCropApplied) {
-          images.push(createCroppedCanvas(processed, photoCropApplied))
-        } else {
-          images.push(processed)
-        }
+        const cropped = photoCropApplied ? createCroppedCanvas(processed, photoCropApplied) : processed
+        const { photoW, photoH } = PRESETS[preset]
+
+        // Every photo is handed to the sheet already fitted to the photo opening,
+        // so it can never be stretched. Change 'contain' to 'cover' if you prefer
+        // the photo to fill the whole opening (edges get trimmed).
+        images.push(
+          fillBlur
+            ? createBlurFillCanvas(cropped, photoW, photoH, exportAutoRotate)
+            : createFitCanvas(cropped, photoW, photoH, exportAutoRotate, 'contain'),
+        )
       }
 
       const layoutInfo = buildSheetLayout(PRESETS[preset], 1, paperSize)
@@ -1407,20 +1582,20 @@ function App() {
         const sheetW = Math.max(1, Math.round(layout.sheetW * previewScale))
         const sheetH = Math.max(1, Math.round(layout.sheetH * previewScale))
 
-        const previewCards: HTMLCanvasElement[] = []
+        const previewCards: Array<{ canvas: HTMLCanvasElement; fillBlur: boolean }> = []
         for (const [index, photo] of photosToRender.entries()) {
           try {
             const actualIndex = startIndex + index
             const image = await loadImageResource(photo.url)
             const proxy = getOrCreateProxy(photo, image)
-            const processed = await renderProcessedImage(proxy, settings)
+            const processed = await renderProcessedImage(proxy, settingsByPhoto[photo.id] ?? settings)
             const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
 
             const cardSource = actualIndex === selectedPhotoIndex && photoCropApplied
               ? createCroppedCanvas(processed, photoCropApplied)
               : processed
 
-            previewCards.push(cardSource)
+            previewCards.push({ canvas: cardSource, fillBlur })
           } catch {
             continue
           }
@@ -1460,7 +1635,8 @@ function App() {
           const x = marginX + col * previewPreset.frameW
           const y = marginY + row * previewPreset.frameH
 
-          const pCard = previewCards[i]
+          const previewCard = previewCards[i]
+          const pCard = previewCard.canvas
           const isLandscape = pCard.width >= pCard.height
           const cardIsLandscape = previewPreset.frameW >= previewPreset.frameH
           const shouldRotate = exportAutoRotate && isLandscape !== cardIsLandscape
@@ -1479,8 +1655,16 @@ function App() {
             }
           }
 
-          const fit = fitImageToFrame(rotatedSource.width, rotatedSource.height, previewPreset)
-          sCtx.drawImage(rotatedSource, x + fit.offsetX, y + fit.offsetY, fit.width, fit.height)
+          if (previewCard.fillBlur) {
+            const blurredPhoto = createBlurFillCanvas(rotatedSource, previewPreset.photoW, previewPreset.photoH)
+            // Keep the blurred fill strictly inside the photo opening; the surrounding frame stays white.
+            sCtx.fillStyle = '#ffffff'
+            sCtx.fillRect(x, y, previewPreset.frameW, previewPreset.frameH)
+            sCtx.drawImage(blurredPhoto, x + previewPreset.offsetX, y + previewPreset.offsetY, previewPreset.photoW, previewPreset.photoH)
+          } else {
+            const fit = fitImageToFrame(rotatedSource.width, rotatedSource.height, previewPreset)
+            sCtx.drawImage(rotatedSource, x + fit.offsetX, y + fit.offsetY, fit.width, fit.height)
+          }
         }
 
         sCtx.strokeStyle = '#000000'
@@ -1544,9 +1728,9 @@ function App() {
     renderPreview()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cropAppliedByPhoto, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, showExportDialog, exportPreviewPage, exportMaxImagesPerPage, exportTotalPages])
+  }, [cropAppliedByPhoto, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, settingsByPhoto, showExportDialog, exportPreviewPage, exportMaxImagesPerPage, exportTotalPages, fillBlur])
 
-  const operationSummary = buildAdjustmentOperations(settings)
+  const operationSummary = buildAdjustmentOperations(activeSettings)
   const stageLabel = activePhoto
     ? `${photos.length} photo${photos.length === 1 ? '' : 's'} | ${activePhoto.name}`
     : ''
@@ -1564,7 +1748,7 @@ function App() {
 
       <div className="window-shell">
         <div className="menu-bar">
-          <button title="Add photos" onClick={handleOpenNativeDialog}>Photos</button>
+          <button title="Add photos" onClick={handleOpenNativeDialog}>Add Photos</button>
           <button title="Open project" onClick={handleOpenProject}>Open Project</button>
           <button title="Save project" onClick={handleSaveProject}>Save Project</button>
           <button title="Clear current selection" onClick={() => {
@@ -1616,8 +1800,8 @@ function App() {
                 </div>
               ) : null}
               <div className="stage-actions">
-                <button title="Previous photo" aria-label="Previous photo" onClick={() => setSelectedPhotoIndex((current) => Math.max(0, current - 1))} disabled={selectedPhotoIndex === 0}>‹</button>
-                <button title="Next photo" aria-label="Next photo" onClick={() => setSelectedPhotoIndex((current) => Math.min(photos.length - 1, current + 1))} disabled={selectedPhotoIndex >= photos.length - 1}>›</button>
+                <button title="Previous photo" aria-label="Previous photo" onClick={() => selectPhoto(Math.max(0, selectedPhotoIndex - 1))} disabled={selectedPhotoIndex === 0}>‹</button>
+                <button title="Next photo" aria-label="Next photo" onClick={() => selectPhoto(Math.min(photos.length - 1, selectedPhotoIndex + 1))} disabled={selectedPhotoIndex >= photos.length - 1}>›</button>
                 <button title="Zoom out" aria-label="Zoom out" onClick={() => adjustZoom(0.9)} disabled={zoom <= 0.25}>−</button>
                 <span className="zoom-level">{Math.round(zoom * 100)}%</span>
                 <button title="Zoom in" aria-label="Zoom in" onClick={() => adjustZoom(1.1)} disabled={zoom >= 3}>+</button>
@@ -1670,7 +1854,7 @@ function App() {
                     className={`thumb-card ${selectedPhotoIndex === index ? 'selected' : ''}`}
                     type="button"
                     title={`Select ${photo.name}`}
-                    onClick={() => setSelectedPhotoIndex(index)}
+                    onClick={() => selectPhoto(index)}
                   >
                     <img src={photo.thumbnailUrl ?? photo.url} alt={photo.name} loading="lazy" />
                   </button>
@@ -1693,6 +1877,32 @@ function App() {
               <div className="histogram-actions">
                 <button type="button" className="auto-correct-button" onClick={handleAutoCorrect} disabled={!activePhoto}>
                   Auto Color for Print
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetAdjustments}
+                  disabled={!activePhoto}
+                  title="Reset adjustments for the selected image only"
+                  aria-label="Reset adjustments for selected image"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    minHeight: 36,
+                    padding: '8px 12px',
+                    border: '1px solid #d97757',
+                    borderRadius: 8,
+                    background: '#fff1eb',
+                    color: '#9a3412',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: activePhoto ? 'pointer' : 'not-allowed',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  ↺ Reset Adjustments
                 </button>
                 <button
                   type="button"
@@ -1720,21 +1930,21 @@ function App() {
             </div>
 
             <div className="slider-stack">
-              <SliderControl label="Exposure" value={settings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Brightness" value={settings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Contrast" value={settings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels Black" value={settings.levelsBlack} min={0} max={1} step={0.01} onChange={(value) => updateSetting('levelsBlack', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels Mid" value={settings.levelsMid} min={0.2} max={3} step={0.01} onChange={(value) => updateSetting('levelsMid', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels White" value={settings.levelsWhite} min={0} max={2} step={0.01} onChange={(value) => updateSetting('levelsWhite', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Highlights" value={settings.highlights} min={0} max={2} step={0.01} onChange={(value) => updateSetting('highlights', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Shadows" value={settings.shadows} min={0} max={2} step={0.01} onChange={(value) => updateSetting('shadows', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Temperature" value={settings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Vibrance" value={settings.vibrance} min={0} max={2} step={0.01} onChange={(value) => updateSetting('vibrance', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Saturation" value={settings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Hue" value={settings.hue} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('hue', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Sharpness" value={settings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Noise Reduction" value={settings.noiseReduction} min={0} max={1} step={0.01} onChange={(value) => updateSetting('noiseReduction', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Vignette" value={settings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Exposure" value={activeSettings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Brightness" value={activeSettings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Contrast" value={activeSettings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Levels Black" value={activeSettings.levelsBlack} min={0} max={1} step={0.01} onChange={(value) => updateSetting('levelsBlack', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Levels Mid" value={activeSettings.levelsMid} min={0.2} max={3} step={0.01} onChange={(value) => updateSetting('levelsMid', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Levels White" value={activeSettings.levelsWhite} min={0} max={2} step={0.01} onChange={(value) => updateSetting('levelsWhite', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Highlights" value={activeSettings.highlights} min={0} max={2} step={0.01} onChange={(value) => updateSetting('highlights', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Shadows" value={activeSettings.shadows} min={0} max={2} step={0.01} onChange={(value) => updateSetting('shadows', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Temperature" value={activeSettings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Vibrance" value={activeSettings.vibrance} min={0} max={2} step={0.01} onChange={(value) => updateSetting('vibrance', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Saturation" value={activeSettings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Hue" value={activeSettings.hue} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('hue', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Sharpness" value={activeSettings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Noise Reduction" value={activeSettings.noiseReduction} min={0} max={1} step={0.01} onChange={(value) => updateSetting('noiseReduction', value)} onInteractionStart={recordHistory} />
+              <SliderControl label="Vignette" value={activeSettings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} onInteractionStart={recordHistory} />
             </div>
           </aside>
         </div>
@@ -1797,7 +2007,7 @@ function App() {
 
                 <div className="toggle-row">
                   <label>Fill background with blur</label>
-                  <input title="Fill background with blurred image" type="checkbox" checked={settings.fillBlur || false} onChange={(event) => updateSetting('fillBlur', event.target.checked)} />
+                  <input title="Fill background with blurred image" type="checkbox" checked={fillBlur} onChange={(event) => setFillBlur(event.target.checked)} />
                 </div>
 
                 <div className="template-row compact">

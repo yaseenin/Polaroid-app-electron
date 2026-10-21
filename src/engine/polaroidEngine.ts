@@ -53,14 +53,14 @@ export type PresetDefinition = {
 
 export const defaultSettings: AdjustmentSettings = {
   exposure: 1,
-  brightness: 1,
-  contrast: 1,
+  brightness: 1.3,
+  contrast: 1.1,
   levelsBlack: 0,
   levelsMid: 1,
   levelsWhite: 1,
   highlights: 1,
   shadows: 0,
-  saturation: 1,
+  saturation: 1.15,
   vibrance: 1,
   hue: 0,
   sharpen: 0,
@@ -585,17 +585,24 @@ export async function renderPolaroidCard(
 
   if (settings.fillBlur) {
     context.save()
-    context.beginPath()
-    context.rect(preset.offsetX, preset.offsetY, preset.photoW, preset.photoH)
-    context.clip()
-
     context.filter = 'blur(20px)'
-    // To mimic img.resize((PHOTO_W, PHOTO_H))
-    context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, preset.offsetX - 20, preset.offsetY - 20, preset.photoW + 40, preset.photoH + 40)
+    context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, 0, 0, preset.frameW, preset.frameH)
     context.restore()
   }
 
-  context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, x, y, fit.width, fit.height)
+  if (settings.fillBlur) {
+    // Keep the full image visible over the blurred fill so the fill shows
+    // through anywhere the source aspect ratio does not match the photo area.
+    context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, x, y, fit.width, fit.height)
+  } else {
+    // Preserve the default fill-to-frame crop when blur fill is disabled.
+    context.save()
+    context.beginPath()
+    context.rect(preset.offsetX, preset.offsetY, preset.photoW, preset.photoH)
+    context.clip()
+    context.drawImage(rotatedSource, 0, 0, rotatedSource.width, rotatedSource.height, preset.offsetX, preset.offsetY, preset.photoW, preset.photoH)
+    context.restore()
+  }
 
   return cardCanvas
 }
