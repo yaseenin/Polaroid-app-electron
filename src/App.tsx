@@ -1,214 +1,156 @@
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import {
-  PAPER_SIZES,
   PRESETS,
   buildAdjustmentOperations,
   buildSheetLayout,
   defaultSettings,
-  fitImageToFrame,
   renderProcessedImage,
   renderSheet,
   type AdjustmentSettings,
   type PaperSizeKey,
   type PresetKey,
 } from './engine/polaroidEngine'
+import { ExportDialog } from './components/ExportDialog'
+import { SliderControl } from './components/SliderControl'
+import {
+  HISTOGRAM_BUCKETS,
+  clamp,
+  clampCropRectToCanvas,
+  createBlurFillCanvas,
+  createCroppedCanvas,
+  createFitCanvas,
+  drawCropOverlay,
+  getAspectValue,
+  getHistogram,
+  normalizeImageUrl,
+  resizeCropRect,
+} from './lib/canvasUtils'
+import type {
+  BuildCard,
+  CropApplied,
+  CropAspect,
+  CropCursor,
+  CropHandle,
+  CropRect,
+  EditorSnapshot,
+  ExportFormat,
+  ExportOrientation,
+  NativeImagePickerResult,
+  Photo,
+  SavedProject,
+} from './types'
 
-type Photo = {
-  id: number
-  name: string
-  url: string
-  path: string
-  thumbnailUrl?: string
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Settings every newly imported photo starts with. */
+const IMPORT_DEFAULTS: AdjustmentSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
+
+/** Explicit neutral values: "Reset" removes the import-time auto-correction entirely. */
+const NEUTRAL_SETTINGS: AdjustmentSettings = {
+  ...defaultSettings,
+  exposure: 1,
+  brightness: 1,
+  contrast: 1,
+  levelsBlack: 0,
+  levelsMid: 1,
+  levelsWhite: 1,
+  highlights: 1,
+  shadows: 0,
+  temperature: 0,
+  vibrance: 1,
+  saturation: 1,
+  hue: 0,
+  sharpen: 0,
+  noiseReduction: 0,
+  vignette: 0,
+  fillBlur: false,
 }
 
-type NativeImagePickerResult = {
-  canceled: boolean
-  filePaths: string[]
-  dataUrls?: string[]
+type SliderKey =
+  | 'exposure'
+  | 'brightness'
+  | 'contrast'
+  | 'levelsBlack'
+  | 'levelsMid'
+  | 'levelsWhite'
+  | 'highlights'
+  | 'shadows'
+  | 'temperature'
+  | 'vibrance'
+  | 'saturation'
+  | 'hue'
+  | 'sharpen'
+  | 'noiseReduction'
+  | 'vignette'
+
+const SLIDERS: Array<{ key: SliderKey; label: string; min: number; max: number }> = [
+  { key: 'exposure', label: 'Exposure', min: 0.5, max: 2 },
+  { key: 'brightness', label: 'Brightness', min: 0.5, max: 2 },
+  { key: 'contrast', label: 'Contrast', min: 0.5, max: 2 },
+  { key: 'levelsBlack', label: 'Levels Black', min: 0, max: 1 },
+  { key: 'levelsMid', label: 'Levels Mid', min: 0.2, max: 3 },
+  { key: 'levelsWhite', label: 'Levels White', min: 0, max: 2 },
+  { key: 'highlights', label: 'Highlights', min: 0, max: 2 },
+  { key: 'shadows', label: 'Shadows', min: 0, max: 2 },
+  { key: 'temperature', label: 'Temperature', min: -1, max: 1 },
+  { key: 'vibrance', label: 'Vibrance', min: 0, max: 2 },
+  { key: 'saturation', label: 'Saturation', min: 0, max: 2 },
+  { key: 'hue', label: 'Hue', min: -1, max: 1 },
+  { key: 'sharpen', label: 'Sharpness', min: 0, max: 2.5 },
+  { key: 'noiseReduction', label: 'Noise Reduction', min: 0, max: 1 },
+  { key: 'vignette', label: 'Vignette', min: 0, max: 1 },
+]
+
+const CROP_ASPECTS: CropAspect[] = ['Free', 'Square', 'Mini', 'Wide']
+const MAX_PREVIEW_DIM = 1200
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 3
+const EMPTY_HISTOGRAM = new Array(HISTOGRAM_BUCKETS).fill(0)
+
+type CropDrag = {
+  mode: 'new' | 'move' | 'resize'
+  handle?: CropHandle
+  startX: number
+  startY: number
+  startRect: CropRect
 }
 
-type CropApplied = { x: number; y: number; width: number; height: number; rotation: number }
-type CropRect = { x: number; y: number; width: number; height: number }
-type EditorSnapshot = {
-  settings: AdjustmentSettings
-  cropAppliedByPhoto: Record<number, CropApplied | null>
-  cropRotation: number
-}
-type SavedProject = {
-  version: 1
-  photos: Array<{ name: string; path: string; cropApplied: CropApplied | null; dataUrl?: string }>
-  settings: AdjustmentSettings
-  preset: PresetKey
-  paperSize: PaperSizeKey
-  selectedPhotoIndex: number
-  exportFormat: 'png' | 'jpeg' | 'pdf'
-  exportPageCount: number
-  exportOrientation: 'portrait' | 'landscape'
-  exportAutoRotate: boolean
-}
-
-type SliderProps = {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (value: number) => void
-  onInteractionStart?: () => void
-}
-
-function SliderControl({ label, value, min, max, step, onChange, onInteractionStart }: SliderProps) {
-  return (
-    <div className="slider-row">
-      <div className="slider-label-row">
-        <label>{label}</label>
-        <span>{value.toFixed(step < 1 ? 2 : 0)}</span>
-      </div>
-      <input
-        title={`Adjust ${label}`}
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onPointerDown={onInteractionStart}
-        onKeyDown={(event) => {
-          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
-            onInteractionStart?.()
-          }
-        }}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </div>
-  )
-}
-
-/** Photo-opening-sized card, same idea as the Python version:
- *  1) the whole image is resized to the opening and blurred as the background,
- *  2) the sharp, undistorted photo is centered on top of it. */
-function createBlurFillCanvas(
-  source: HTMLCanvasElement,
-  targetWidth: number,
-  targetHeight: number,
-  rotateToFit = false,
-): HTMLCanvasElement {
-  const BLUR_RADIUS = 20 // change this number for more / less blur
-
-  let foreground = source
-
-  if (rotateToFit && (source.width >= source.height) !== (targetWidth >= targetHeight)) {
-    const rotated = document.createElement('canvas')
-    rotated.width = source.height
-    rotated.height = source.width
-    const rotateContext = rotated.getContext('2d')
-    if (rotateContext) {
-      rotateContext.translate(rotated.width / 2, rotated.height / 2)
-      rotateContext.rotate(Math.PI / 2)
-      rotateContext.drawImage(source, -source.width / 2, -source.height / 2)
-      foreground = rotated
-    }
-  }
-
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(targetWidth))
-  canvas.height = Math.max(1, Math.round(targetHeight))
-  const context = canvas.getContext('2d')
-  if (!context) return foreground
-
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, canvas.width, canvas.height)
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
-
-  // Background: whole image resized to the photo opening, then blurred.
-  // It is drawn slightly oversized so the blurred edges do not fade to white.
-  const bleed = BLUR_RADIUS * 2
-  context.save()
-  if ('filter' in context) {
-    context.filter = `blur(${BLUR_RADIUS}px)`
-    context.drawImage(foreground, -bleed, -bleed, canvas.width + bleed * 2, canvas.height + bleed * 2)
-  } else {
-    // Fallback if canvas blur filters are not supported: shrink then enlarge.
-    const small = document.createElement('canvas')
-    small.width = Math.max(1, Math.round(canvas.width / BLUR_RADIUS))
-    small.height = Math.max(1, Math.round(canvas.height / BLUR_RADIUS))
-    const smallContext = small.getContext('2d')
-    if (smallContext) {
-      smallContext.imageSmoothingQuality = 'high'
-      smallContext.drawImage(foreground, 0, 0, small.width, small.height)
-      context.drawImage(small, -bleed, -bleed, canvas.width + bleed * 2, canvas.height + bleed * 2)
-    }
-  }
-  context.restore()
-
-  // Foreground: the sharp photo, fitted without distortion and centered.
-  const fitScale = Math.min(canvas.width / foreground.width, canvas.height / foreground.height)
-  const fitWidth = foreground.width * fitScale
-  const fitHeight = foreground.height * fitScale
-  context.filter = 'none'
-  context.drawImage(foreground, (canvas.width - fitWidth) / 2, (canvas.height - fitHeight) / 2, fitWidth, fitHeight)
-  return canvas
-}
-
-/** Fits a photo into a targetWidth x targetHeight canvas WITHOUT distorting it.
- *  'contain' = whole photo visible (white bars where needed).
- *  'cover'   = photo fills the whole opening (edges are trimmed). */
-function createFitCanvas(
-  source: HTMLCanvasElement,
-  targetWidth: number,
-  targetHeight: number,
-  rotateToFit = false,
-  mode: 'contain' | 'cover' = 'contain',
-): HTMLCanvasElement {
-  let foreground = source
-
-  if (rotateToFit && (source.width >= source.height) !== (targetWidth >= targetHeight)) {
-    const rotated = document.createElement('canvas')
-    rotated.width = source.height
-    rotated.height = source.width
-    const rotateContext = rotated.getContext('2d')
-    if (rotateContext) {
-      rotateContext.translate(rotated.width / 2, rotated.height / 2)
-      rotateContext.rotate(Math.PI / 2)
-      rotateContext.drawImage(source, -source.width / 2, -source.height / 2)
-      foreground = rotated
-    }
-  }
-
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(targetWidth))
-  canvas.height = Math.max(1, Math.round(targetHeight))
-  const context = canvas.getContext('2d')
-  if (!context) return foreground
-
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, canvas.width, canvas.height)
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
-
-  const scale =
-    mode === 'cover'
-      ? Math.max(canvas.width / foreground.width, canvas.height / foreground.height)
-      : Math.min(canvas.width / foreground.width, canvas.height / foreground.height)
-  const drawWidth = foreground.width * scale
-  const drawHeight = foreground.height * scale
-  context.drawImage(foreground, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight)
-  return canvas
-}
+/* ------------------------------------------------------------------ */
+/* Component                                                           */
+/* ------------------------------------------------------------------ */
 
 function App() {
+  /* ---- Library / project state ---- */
   const [photos, setPhotos] = useState<Photo[]>([])
+  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0)
+  const [settingsByPhoto, setSettingsByPhoto] = useState<Record<number, AdjustmentSettings>>({})
+  const [cropAppliedByPhoto, setCropAppliedByPhoto] = useState<Record<number, CropApplied | null>>({})
+  const [cropRectByPhoto, setCropRectByPhoto] = useState<Record<number, CropRect | null>>({})
+  const [adjustmentClipboard, setAdjustmentClipboard] = useState<{
+    settings: AdjustmentSettings
+    cropApplied: CropApplied | null
+  } | null>(null)
+
+  /* ---- Import behavior ---- */
+  const [applyAutoCorrectionOnImport, setApplyAutoCorrectionOnImport] = useState(false)
+
+  /* ---- Export state ---- */
   const [preset, setPreset] = useState<PresetKey>('mini')
   const [paperSize, setPaperSize] = useState<PaperSizeKey>('A4')
-  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0)
-  const [exportFormat, setExportFormat] = useState<'png' | 'jpeg' | 'pdf'>('png')
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('png')
+  // NOTE: page count and orientation are stored in projects and shown in the preview,
+  // but the sheet engine (buildSheetLayout / renderSheet) does not take them yet.
   const [exportPageCount, setExportPageCount] = useState(1)
-  const [exportOrientation, setExportOrientation] = useState<'portrait' | 'landscape'>('portrait')
+  const [exportOrientation, setExportOrientation] = useState<ExportOrientation>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
   const [fillBlur, setFillBlur] = useState(false)
-  const [settings, setSettings] = useState<AdjustmentSettings>(defaultSettings)
-  const [settingsByPhoto, setSettingsByPhoto] = useState<Record<number, AdjustmentSettings>>({})
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportPreviewPage, setExportPreviewPage] = useState(0)
+
+  /* ---- Editor UI state ---- */
   const [showOriginalPreview, setShowOriginalPreview] = useState(false)
   const [status, setStatus] = useState('No photos added yet')
   const [processing, setProcessing] = useState(false)
@@ -218,218 +160,89 @@ function App() {
   const [zoom, setZoom] = useState(1)
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
-  type CropHandle = 'nw' | 'ne' | 'sw' | 'se'
+  const [histogram, setHistogram] = useState<number[]>(EMPTY_HISTOGRAM)
 
-  const [showExportDialog, setShowExportDialog] = useState(false)
-  const [exportPreviewPage, setExportPreviewPage] = useState(0)
+  /* ---- Crop UI state ---- */
   const [cropMode, setCropMode] = useState(false)
-  const [cropAspect, setCropAspect] = useState<'Free' | 'Square' | 'Mini' | 'Wide'>('Free')
+  const [cropAspect, setCropAspect] = useState<CropAspect>('Free')
   const [cropRotation, setCropRotation] = useState(0)
-  const [cropRect, setCropRect] = useState<CropRect | null>(null)
-  const [cropApplied, setCropApplied] = useState<CropApplied | null>(null)
-  const [cropRectByPhoto, setCropRectByPhoto] = useState<Record<number, CropRect | null>>({})
-  const [cropAppliedByPhoto, setCropAppliedByPhoto] = useState<Record<number, CropApplied | null>>({})
-  const [cropCursor, setCropCursor] = useState<'crosshair' | 'move' | 'nwse-resize' | 'nesw-resize'>('crosshair')
-  const [histogram, setHistogram] = useState<number[]>(new Array(32).fill(0))
+  const [cropCursor, setCropCursor] = useState<CropCursor>('crosshair')
+
+  /* ---- Refs ---- */
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canvasPanelRef = useRef<HTMLDivElement>(null)
   const previewCanvasRef = useRef<HTMLCanvasElement>(null)
-  const exportPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const processedPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map())
   const previewProxyRef = useRef<Map<number, HTMLCanvasElement>>(new Map())
   const renderRafRef = useRef<number | null>(null)
-  const cropStartRef = useRef<{ x: number; y: number } | null>(null)
-  const cropDragRef = useRef<{ mode: 'new' | 'move' | 'resize'; handle?: CropHandle; startX: number; startY: number; startRect: { x: number; y: number; width: number; height: number } } | null>(null)
+  const cropDragRef = useRef<CropDrag | null>(null)
   const lastPointerPositionRef = useRef({ x: 0, y: 0 })
   const panDragRef = useRef<{ pointerId: number; clientX: number; clientY: number; offsetX: number; offsetY: number } | null>(null)
+  const zoomRef = useRef(1)
+  const panRef = useRef({ x: 0, y: 0 })
+  const nextPhotoIdRef = useRef(1)
+  const cropRectRef = useRef<CropRect | null>(null)
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => {})
 
-  const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
-  const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? settings : settings
+  /* ---- Derived values (single source of truth: the per-photo maps) ---- */
+  const activePhoto: Photo | undefined = photos[selectedPhotoIndex] ?? photos[0]
+  const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? defaultSettings : defaultSettings
+  const cropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
+  const cropRect = activePhoto ? cropRectByPhoto[activePhoto.id] ?? null : null
+  const activeCropApplied = cropApplied
+  cropRectRef.current = cropRect
+  zoomRef.current = zoom
+  panRef.current = panOffset
 
-  const captureSnapshot = (): EditorSnapshot => ({ settings: activeSettings, cropAppliedByPhoto, cropRotation })
+  const nextPhotoId = () => nextPhotoIdRef.current++
+
+  /* ---- Setting / crop writers ---- */
+  const commitSettings = (next: AdjustmentSettings) => {
+    if (!activePhoto) return
+    setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: next }))
+  }
+
+  const updateSetting = (key: SliderKey, value: number) => commitSettings({ ...activeSettings, [key]: value })
+
+  const setCropRectFor = (photoId: number, rect: CropRect | null) =>
+    setCropRectByPhoto((current) => ({ ...current, [photoId]: rect }))
+
+  const setCropAppliedFor = (photoId: number, applied: CropApplied | null) =>
+    setCropAppliedByPhoto((current) => ({ ...current, [photoId]: applied }))
+
+  /* ---- History ---- */
+  const captureSnapshot = (photoId: number | null = activePhoto?.id ?? null): EditorSnapshot => ({
+    photoId,
+    settings: photoId !== null ? settingsByPhoto[photoId] ?? defaultSettings : defaultSettings,
+    cropAppliedByPhoto,
+    cropRotation,
+  })
 
   const recordHistory = () => {
     setUndoStack((current) => [...current.slice(-49), captureSnapshot()])
     setRedoStack([])
   }
 
-  const updateSetting = <K extends keyof AdjustmentSettings>(key: K, value: AdjustmentSettings[K]) => {
-    const next = { ...activeSettings, [key]: value }
-    setSettings(next)
-    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: next }))
-  }
-
-  const handleResetAdjustments = () => {
-    if (!activePhoto) return
-    recordHistory()
-
-    // Explicit neutral values ensure Reset removes the import-time auto-correction
-    // rather than returning to the app's general defaults or imported settings.
-    const originalImageSettings: AdjustmentSettings = {
-      ...defaultSettings,
-      exposure: 1,
-      brightness: 1,
-      contrast: 1,
-      levelsBlack: 0,
-      levelsMid: 1,
-      levelsWhite: 1,
-      highlights: 1,
-      shadows: 1,
-      temperature: 0,
-      vibrance: 1,
-      saturation: 1,
-      hue: 0,
-      sharpen: 0,
-      noiseReduction: 0,
-      vignette: 0,
-      fillBlur: false,
+  const restoreSnapshot = (snapshot: EditorSnapshot) => {
+    const { photoId } = snapshot
+    if (photoId !== null) {
+      setSettingsByPhoto((current) => ({ ...current, [photoId]: snapshot.settings }))
+      const index = photos.findIndex((photo) => photo.id === photoId)
+      if (index >= 0) setSelectedPhotoIndex(index)
     }
-
-    setSettings(originalImageSettings)
-    setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: originalImageSettings }))
-    setStatus(`Restored original appearance for ${activePhoto.name}`)
-  }
-
-  const selectPhoto = (index: number) => {
-    const photo = photos[index]
-    if (!photo) return
-    setSelectedPhotoIndex(index)
-    setSettings(settingsByPhoto[photo.id] ?? defaultSettings)
-  }
-
-  const getAspectValue = (aspect: 'Free' | 'Square' | 'Mini' | 'Wide') => {
-    switch (aspect) {
-      case 'Square':
-        return 1
-      case 'Mini':
-        return 68 / 91
-      case 'Wide':
-        return 1.234
-      default:
-        return null
-    }
-  }
-
-  const clampCropRectToCanvas = (
-    rect: { x: number; y: number; width: number; height: number },
-    canvasWidth: number,
-    canvasHeight: number,
-    aspectRatio: number | null = null,
-  ) => {
-    const x = Math.min(Math.max(rect.x, 0), Math.max(0, canvasWidth - 8))
-    const y = Math.min(Math.max(rect.y, 0), Math.max(0, canvasHeight - 8))
-    let width = Math.max(10, rect.width)
-    let height = Math.max(10, rect.height)
-
-    if (x + width > canvasWidth) {
-      width = Math.max(10, canvasWidth - x)
-    }
-    if (y + height > canvasHeight) {
-      height = Math.max(10, canvasHeight - y)
-    }
-
-    if (aspectRatio) {
-      const targetWidth = Math.max(10, width)
-      const targetHeight = Math.max(10, height)
-      const currentRatio = targetWidth / targetHeight
-
-      if (currentRatio > aspectRatio) {
-        width = targetHeight * aspectRatio
-      } else {
-        height = targetWidth / aspectRatio
-      }
-
-      if (x + width > canvasWidth) {
-        width = Math.max(10, canvasWidth - x)
-        height = width / aspectRatio
-      }
-      if (y + height > canvasHeight) {
-        height = Math.max(10, canvasHeight - y)
-        width = height * aspectRatio
-      }
-    }
-
-    return { x, y, width: Math.min(width, canvasWidth - x), height: Math.min(height, canvasHeight - y) }
-  }
-
-  const drawCropOverlay = (
-    targetCanvas: HTMLCanvasElement,
-    sourceCanvas: HTMLCanvasElement,
-    rect: { x: number; y: number; width: number; height: number } | null,
-    enabled: boolean,
-    aspect: 'Free' | 'Square' | 'Mini' | 'Wide',
-  ) => {
-    const context = targetCanvas.getContext('2d')
-    if (!context) {
-      return
-    }
-
-    context.clearRect(0, 0, targetCanvas.width, targetCanvas.height)
-    context.imageSmoothingEnabled = true
-    context.imageSmoothingQuality = 'high'
-    context.drawImage(sourceCanvas, 0, 0, targetCanvas.width, targetCanvas.height)
-
-    if (!enabled || !rect) {
-      return
-    }
-
-    const nextRect = clampCropRectToCanvas(rect, targetCanvas.width, targetCanvas.height, getAspectValue(aspect))
-
-    context.strokeStyle = '#67c8ff'
-    context.lineWidth = 2
-    context.strokeRect(nextRect.x, nextRect.y, nextRect.width, nextRect.height)
-
-    const handleSize = 8
-    const handles = [
-      { x: nextRect.x, y: nextRect.y },
-      { x: nextRect.x + nextRect.width, y: nextRect.y },
-      { x: nextRect.x, y: nextRect.y + nextRect.height },
-      { x: nextRect.x + nextRect.width, y: nextRect.y + nextRect.height },
-    ]
-
-    handles.forEach((handle) => {
-      context.fillStyle = '#ffffff'
-      context.fillRect(handle.x - handleSize / 2, handle.y - handleSize / 2, handleSize, handleSize)
-      context.strokeStyle = '#67c8ff'
-      context.lineWidth = 1
-      context.strokeRect(handle.x - handleSize / 2, handle.y - handleSize / 2, handleSize, handleSize)
-    })
-  }
-
-  const getHistogram = (image: HTMLCanvasElement) => {
-    const context = image.getContext('2d')
-    if (!context) {
-      return new Array(32).fill(0)
-    }
-
-    const imageData = context.getImageData(0, 0, image.width, image.height)
-    const buckets = new Array(32).fill(0)
-    const data = imageData.data
-    const len = data.length
-    // Sample ~8,000 pixels for sub-millisecond calculation
-    const stride = Math.max(1, Math.floor(len / (4 * 8000)))
-    const step = stride * 4
-    for (let i = 0; i < len; i += step) {
-      const luminance = Math.min(31, Math.max(0, ((data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 8) | 0))
-      buckets[luminance] += 1
-    }
-
-    const maxValue = Math.max(...buckets, 1)
-    return buckets.map((value) => (value / maxValue) * 100)
+    setCropAppliedByPhoto(snapshot.cropAppliedByPhoto)
+    setCropRotation(snapshot.cropRotation)
+    setCropRectByPhoto({})
+    setCropMode(false)
   }
 
   const handleUndo = () => {
     const previous = undoStack[undoStack.length - 1]
     if (!previous) return
     setUndoStack((current) => current.slice(0, -1))
-    setRedoStack((current) => [...current, captureSnapshot()])
-    setSettings(previous.settings)
-    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: previous.settings }))
-    setCropAppliedByPhoto(previous.cropAppliedByPhoto)
-    setCropRotation(previous.cropRotation)
-    setCropRect(null)
-    setCropMode(false)
+    setRedoStack((current) => [...current, captureSnapshot(previous.photoId)])
+    restoreSnapshot(previous)
     setStatus('Change undone')
   }
 
@@ -437,211 +250,113 @@ function App() {
     const next = redoStack[redoStack.length - 1]
     if (!next) return
     setRedoStack((current) => current.slice(0, -1))
-    setUndoStack((current) => [...current, captureSnapshot()])
-    setSettings(next.settings)
-    if (activePhoto) setSettingsByPhoto((current) => ({ ...current, [activePhoto.id]: next.settings }))
-    setCropAppliedByPhoto(next.cropAppliedByPhoto)
-    setCropRotation(next.cropRotation)
-    setCropRect(null)
-    setCropMode(false)
+    setUndoStack((current) => [...current, captureSnapshot(next.photoId)])
+    restoreSnapshot(next)
     setStatus('Change redone')
   }
 
-  const adjustZoom = (factor: number) => {
-    const nextZoom = Math.min(3, Math.max(0.25, Number((zoom * factor).toFixed(2))))
-    if (nextZoom === zoom) return
+  /* ---- Image loading / caches ---- */
+  const loadImageResource = useCallback((src: string) => {
+    const cached = imageCacheRef.current.get(src)
+    if (cached && (cached.complete || cached.naturalWidth > 0)) return Promise.resolve(cached)
 
-    const ratio = nextZoom / zoom
-    const anchor = lastPointerPositionRef.current
-    setPanOffset((current) => ({
-      x: anchor.x - ratio * (anchor.x - current.x),
-      y: anchor.y - ratio * (anchor.y - current.y),
-    }))
-    setZoom(nextZoom)
-  }
-
-  const fitPreview = () => {
-    setZoom(1)
-    setPanOffset({ x: 0, y: 0 })
-  }
-
-  useEffect(() => {
-    const canvasPanel = canvasPanelRef.current
-    if (!canvasPanel) return
-
-    const handleWheel = (event: WheelEvent) => {
-      event.preventDefault()
-      const factor = event.deltaY < 0 ? 1.1 : 0.9
-      const nextZoom = Math.min(3, Math.max(0.25, Number((zoom * factor).toFixed(2))))
-      if (nextZoom === zoom) return
-
-      const bounds = canvasPanel.getBoundingClientRect()
-      const anchor = {
-        x: event.clientX - (bounds.left + bounds.width / 2),
-        y: event.clientY - (bounds.top + bounds.height / 2),
+    return new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image()
+      image.crossOrigin = 'anonymous'
+      image.decoding = 'async'
+      image.onload = () => {
+        imageCacheRef.current.set(src, image)
+        resolve(image)
       }
-      lastPointerPositionRef.current = anchor
-      const ratio = nextZoom / zoom
-      setPanOffset((current) => ({
-        x: anchor.x - ratio * (anchor.x - current.x),
-        y: anchor.y - ratio * (anchor.y - current.y),
-      }))
-      setZoom(nextZoom)
-    }
-
-    canvasPanel.addEventListener('wheel', handleWheel, { passive: false })
-    return () => canvasPanel.removeEventListener('wheel', handleWheel)
-  }, [zoom])
-
-  useEffect(() => {
-    setZoom(1)
-    setPanOffset({ x: 0, y: 0 })
-  }, [activePhoto?.id])
-
-  const handlePanPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (cropMode || zoom <= 1 || event.button !== 0) return
-
-    event.preventDefault()
-    const bounds = event.currentTarget.getBoundingClientRect()
-    lastPointerPositionRef.current = {
-      x: event.clientX - (bounds.left + bounds.width / 2),
-      y: event.clientY - (bounds.top + bounds.height / 2),
-    }
-    panDragRef.current = {
-      pointerId: event.pointerId,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      offsetX: panOffset.x,
-      offsetY: panOffset.y,
-    }
-    event.currentTarget.setPointerCapture(event.pointerId)
-    setIsPanning(true)
-  }
-
-  const handlePanPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    const bounds = event.currentTarget.getBoundingClientRect()
-    lastPointerPositionRef.current = {
-      x: event.clientX - (bounds.left + bounds.width / 2),
-      y: event.clientY - (bounds.top + bounds.height / 2),
-    }
-
-    const drag = panDragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
-    setPanOffset({
-      x: drag.offsetX + event.clientX - drag.clientX,
-      y: drag.offsetY + event.clientY - drag.clientY,
+      image.onerror = () => reject(new Error(`Unable to load image: ${src}`))
+      image.src = src
     })
-  }
+  }, [])
 
-  const handlePanPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (panDragRef.current?.pointerId !== event.pointerId) return
-    panDragRef.current = null
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
+  const getOrCreateProxy = useCallback((photo: Photo, image: HTMLImageElement): HTMLCanvasElement => {
+    const existing = previewProxyRef.current.get(photo.id)
+    if (existing) return existing
+
+    const naturalW = image.naturalWidth || image.width
+    const naturalH = image.naturalHeight || image.height
+    const scale = Math.min(1, MAX_PREVIEW_DIM / Math.max(naturalW, naturalH))
+    const proxy = document.createElement('canvas')
+    proxy.width = Math.max(1, Math.round(naturalW * scale))
+    proxy.height = Math.max(1, Math.round(naturalH * scale))
+    const context = proxy.getContext('2d')
+    if (context) {
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(image, 0, 0, proxy.width, proxy.height)
     }
-    setIsPanning(false)
-  }
-
-  const syncSelectedCropState = (nextRect: { x: number; y: number; width: number; height: number } | null, nextApplied: { x: number; y: number; width: number; height: number; rotation: number } | null) => {
-    if (!activePhoto) {
-      setCropRect(nextRect)
-      setCropApplied(nextApplied)
-      return
-    }
-
-    setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: nextRect }))
-    setCropAppliedByPhoto((current) => ({ ...current, [activePhoto.id]: nextApplied }))
-    setCropRect(nextRect)
-    setCropApplied(nextApplied)
-  }
-
-  useEffect(() => {
-    if (!activePhoto) {
-      setCropRect(null)
-      setCropApplied(null)
-      return
-    }
-
-    const nextRect = cropRectByPhoto[activePhoto.id] ?? null
-    const nextApplied = cropAppliedByPhoto[activePhoto.id] ?? null
-    setCropRect(nextRect)
-    setCropApplied(nextApplied)
-  }, [activePhoto, cropRectByPhoto, cropAppliedByPhoto])
-
-  const handleAddPhotos = () => {
-    fileInputRef.current?.click()
-  }
+    previewProxyRef.current.set(photo.id, proxy)
+    return proxy
+  }, [])
 
   const generateThumbnails = (photoList: Photo[]) => {
     photoList.forEach(async (photo) => {
       try {
-        const img = await loadImageResource(photo.url)
-        const canvas = document.createElement('canvas')
+        const image = await loadImageResource(photo.url)
         const targetSize = 160
-        const scale = Math.min(targetSize / img.naturalWidth, targetSize / img.naturalHeight, 1)
-        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
-        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
-        const ctx = canvas.getContext('2d')
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-          const thumbUrl = canvas.toDataURL('image/jpeg', 0.75)
-          setPhotos((current) =>
-            current.map((p) => (p.id === photo.id ? { ...p, thumbnailUrl: thumbUrl } : p))
-          )
-        }
+        const scale = Math.min(targetSize / image.naturalWidth, targetSize / image.naturalHeight, 1)
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+        const context = canvas.getContext('2d')
+        if (!context) return
+        context.drawImage(image, 0, 0, canvas.width, canvas.height)
+        const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.75)
+        setPhotos((current) =>
+          current.map((p) =>
+            p.id === photo.id ? { ...p, thumbnailUrl, width: image.naturalWidth, height: image.naturalHeight } : p,
+          ),
+        )
       } catch {
-        // fallback to full url
+        // fall back to the full-size url
       }
     })
   }
 
+  const releasePhotos = (list: Photo[]) => {
+    list.forEach((photo) => {
+      if (photo.url.startsWith('blob:')) URL.revokeObjectURL(photo.url)
+    })
+    imageCacheRef.current.clear()
+    previewProxyRef.current.clear()
+  }
+
+  /* ---- Importing photos ---- */
+  const addPhotos = (incoming: Photo[], sourceLabel: string) => {
+    if (incoming.length === 0) return
+    setPhotos((current) => [...current, ...incoming])
+    setSelectedPhotoIndex(photos.length + incoming.length - 1)
+    const importSettings = applyAutoCorrectionOnImport ? IMPORT_DEFAULTS : NEUTRAL_SETTINGS
+    setSettingsByPhoto((current) => ({
+      ...current,
+      ...Object.fromEntries(incoming.map((photo) => [photo.id, importSettings])),
+    }))
+    generateThumbnails(incoming)
+    setStatus(`${incoming.length} photo(s) loaded${sourceLabel}`)
+  }
+
   const appendFiles = (files: File[]) => {
-    const nextPhotos: Photo[] = files.map((file) => ({
-      id: Date.now() + Math.random(),
+    const images = files.filter((file) => file.type.startsWith('image/'))
+    if (images.length !== files.length) setStatus('Some files were skipped because they are not images.')
+    const incoming: Photo[] = images.map((file) => ({
+      id: nextPhotoId(),
       name: file.name,
       url: URL.createObjectURL(file),
       path: (file as File & { path?: string }).path ?? file.name,
     }))
-
-    if (nextPhotos.length === 0) {
-      return
-    }
-
-    setPhotos((current) => {
-      const next = [...current, ...nextPhotos]
-      setSelectedPhotoIndex(Math.max(0, next.length - 1))
-      return next
-    })
-    const importedSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
-    setSettings(importedSettings)
-    setSettingsByPhoto((current) => ({ ...current, ...Object.fromEntries(nextPhotos.map((photo) => [photo.id, importedSettings])) }))
-    generateThumbnails(nextPhotos)
-    setStatus(`${nextPhotos.length} photo(s) loaded into the pipeline`)
+    addPhotos(incoming, ' into the pipeline')
   }
 
   const handleFilesSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? [])
-    appendFiles(files)
+    appendFiles(Array.from(event.target.files ?? []))
     event.target.value = ''
   }
 
-  const normalizeImageUrl = (filePath: string) => {
-    const normalized = filePath.replace(/\\/g, '/')
-
-    if (/^(blob:|data:|https?:)/i.test(normalized)) {
-      return normalized
-    }
-
-    if (/^\//.test(normalized)) {
-      return `file://${normalized}`
-    }
-
-    if (/^[A-Za-z]:\//.test(normalized)) {
-      return `file:///${normalized}`
-    }
-
-    return `file:///${normalized}`
-  }
+  const handleAddPhotos = () => fileInputRef.current?.click()
 
   const handleOpenNativeDialog = async () => {
     if (!window.polaroidEngine?.openImagePicker) {
@@ -650,29 +365,73 @@ function App() {
     }
 
     const result = (await window.polaroidEngine.openImagePicker()) as NativeImagePickerResult
-    if (!result || result.canceled || !Array.isArray(result.filePaths)) {
-      return
-    }
+    if (!result || result.canceled || !Array.isArray(result.filePaths)) return
 
-    const nextPhotos: Photo[] = result.filePaths.map((filePath: string, index: number) => ({
-      id: Date.now() + Math.random() + index,
+    const incoming: Photo[] = result.filePaths.map((filePath, index) => ({
+      id: nextPhotoId(),
       name: filePath.split(/[\\/]/).pop() ?? 'photo',
       url: result.dataUrls?.[index] ?? normalizeImageUrl(filePath),
       path: filePath,
     }))
-
-    setPhotos((current) => {
-      const next = [...current, ...nextPhotos]
-      setSelectedPhotoIndex(Math.max(0, next.length - 1))
-      return next
-    })
-    const importedSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
-    setSettings(importedSettings)
-    setSettingsByPhoto((current) => ({ ...current, ...Object.fromEntries(nextPhotos.map((photo) => [photo.id, importedSettings])) }))
-    generateThumbnails(nextPhotos)
-    setStatus(`${nextPhotos.length} photo(s) loaded from the native dialog`)
+    addPhotos(incoming, ' from the native dialog')
   }
 
+  const handleNew = () => {
+    releasePhotos(photos)
+    setPhotos([])
+    setSettingsByPhoto({})
+    setCropAppliedByPhoto({})
+    setCropRectByPhoto({})
+    setCropMode(false)
+    setCropRotation(0)
+    setSelectedPhotoIndex(0)
+    setUndoStack([])
+    setRedoStack([])
+    setLastOutputDir(null)
+    setStatus('No photos added yet')
+  }
+
+  const handleDeleteSelectedImage = () => {
+    if (photos.length === 0) return
+    const id = photos[selectedPhotoIndex].id
+    releasePhotos([photos[selectedPhotoIndex]])
+    setPhotos(photos.filter((_, i) => i !== selectedPhotoIndex))
+    setSettingsByPhoto(Object.fromEntries(Object.entries(settingsByPhoto).filter(([k]) => k !== String(id))))
+    setCropAppliedByPhoto(Object.fromEntries(Object.entries(cropAppliedByPhoto).filter(([k]) => k !== String(id))))
+    setCropRectByPhoto(Object.fromEntries(Object.entries(cropRectByPhoto).filter(([k]) => k !== String(id))))
+    setSelectedPhotoIndex(Math.max(0, selectedPhotoIndex - 1))
+    setStatus('Image deleted')
+  }
+
+  const handlePolaroidBuilder = () => {
+    setStatus('Polaroid Builder coming soon')
+  }
+
+  const handleImpositionBuilder = () => {
+    setStatus('Imposition Builder coming soon')
+  }
+
+  const handleRemoveAllImages = () => {
+    if (photos.length === 0) return
+    releasePhotos(photos)
+    setPhotos([])
+    setSettingsByPhoto({})
+    setCropAppliedByPhoto({})
+    setCropRectByPhoto({})
+    setCropMode(false)
+    setCropRotation(0)
+    setSelectedPhotoIndex(0)
+    setUndoStack([])
+    setRedoStack([])
+    setStatus('All images removed')
+  }
+
+  const selectPhoto = (index: number) => {
+    if (!photos[index]) return
+    setSelectedPhotoIndex(index)
+  }
+
+  /* ---- Projects ---- */
   const handleSaveProject = async () => {
     if (!window.polaroidEngine?.saveProject) {
       setStatus('Project saving is available in the desktop app.')
@@ -685,6 +444,7 @@ function App() {
         name: photo.name,
         path: photo.path,
         cropApplied: cropAppliedByPhoto[photo.id] ?? null,
+        settings: settingsByPhoto[photo.id] ?? defaultSettings,
       })),
       settings: activeSettings,
       preset,
@@ -722,25 +482,26 @@ function App() {
         throw new Error('This file is not a supported Polaroid project.')
       }
 
-      const restoredPhotos = project.photos.map((photo, index) => {
+      const restored = project.photos.map((photo, index) => {
         if (!photo.path || !photo.dataUrl) {
           throw new Error(`The project is missing image data for ${photo.name || `photo ${index + 1}`}.`)
         }
         return {
-          id: Date.now() + Math.random() + index,
-          name: photo.name,
-          path: photo.path,
-          url: photo.dataUrl,
+          saved: photo,
+          photo: { id: nextPhotoId(), name: photo.name, path: photo.path, url: photo.dataUrl } as Photo,
         }
       })
-      const restoredCrops: Record<number, CropApplied | null> = {}
-      restoredPhotos.forEach((photo, index) => {
-        restoredCrops[photo.id] = project.photos[index].cropApplied ?? null
-      })
 
+      releasePhotos(photos)
+      const restoredPhotos = restored.map((entry) => entry.photo)
       setPhotos(restoredPhotos)
-      setSettings(project.settings ?? defaultSettings)
-      setSettingsByPhoto(Object.fromEntries(restoredPhotos.map((photo) => [photo.id, project.settings ?? defaultSettings])))
+      setSettingsByPhoto(
+        Object.fromEntries(
+          restored.map(({ saved, photo }) => [photo.id, saved.settings ?? project.settings ?? defaultSettings]),
+        ),
+      )
+      setCropAppliedByPhoto(Object.fromEntries(restored.map(({ saved, photo }) => [photo.id, saved.cropApplied ?? null])))
+      setCropRectByPhoto({})
       setPreset(project.preset ?? 'mini')
       setPaperSize(project.paperSize ?? 'A4')
       setSelectedPhotoIndex(Math.min(project.selectedPhotoIndex ?? 0, Math.max(0, restoredPhotos.length - 1)))
@@ -748,67 +509,48 @@ function App() {
       setExportPageCount(project.exportPageCount ?? 1)
       setExportOrientation(project.exportOrientation ?? 'portrait')
       setExportAutoRotate(project.exportAutoRotate ?? true)
-      setCropAppliedByPhoto(restoredCrops)
-      setCropRectByPhoto({})
-      setCropRect(null)
       setCropMode(false)
       setCropRotation(0)
       setUndoStack([])
       setRedoStack([])
       setLastOutputDir(null)
+      generateThumbnails(restoredPhotos)
       setStatus(`Opened project with ${restoredPhotos.length} photo(s)`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to open the project.')
     }
   }
 
-  useEffect(() => {
-    if (!photos.length) {
-      setSelectedPhotoIndex(0)
-      return
-    }
-
-    setSelectedPhotoIndex((current) => Math.min(current, photos.length - 1))
-  }, [photos.length])
-
-  const loadImageResource = (src: string) => {
-    const cached = imageCacheRef.current.get(src)
-    if (cached && (cached.complete || cached.naturalWidth > 0)) {
-      return Promise.resolve(cached)
-    }
-
-    return new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image()
-      image.crossOrigin = 'anonymous'
-      image.decoding = 'async'
-      image.onload = () => {
-        imageCacheRef.current.set(src, image)
-        resolve(image)
-      }
-      image.onerror = () => reject(new Error(`Unable to load image: ${src}`))
-      image.src = src
+  /* ---- Adjustments: copy / paste / reset / auto ---- */
+  const handleCopyAdjustments = () => {
+    if (!activePhoto) return
+    const currentCrop = cropAppliedByPhoto[activePhoto.id] ?? null
+    setAdjustmentClipboard({
+      settings: { ...activeSettings },
+      cropApplied: currentCrop ? { ...currentCrop } : null,
     })
+    setStatus(`Copied adjustments${currentCrop ? ' & crop' : ''} from ${activePhoto.name}`)
   }
 
-  const MAX_PREVIEW_DIM = 1200
-  const getOrCreateProxy = (photo: Photo, image: HTMLImageElement): HTMLCanvasElement => {
-    let proxy = previewProxyRef.current.get(photo.id)
-    if (proxy) return proxy
+  const handlePasteAdjustments = (includeCrop: boolean) => {
+    if (!activePhoto || !adjustmentClipboard) return
+    recordHistory()
+    commitSettings({ ...adjustmentClipboard.settings })
 
-    const naturalW = image.naturalWidth || image.width
-    const naturalH = image.naturalHeight || image.height
-    const scale = Math.min(1, MAX_PREVIEW_DIM / Math.max(naturalW, naturalH))
-    proxy = document.createElement('canvas')
-    proxy.width = Math.max(1, Math.round(naturalW * scale))
-    proxy.height = Math.max(1, Math.round(naturalH * scale))
-    const ctx = proxy.getContext('2d')
-    if (ctx) {
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(image, 0, 0, proxy.width, proxy.height)
+    if (includeCrop && adjustmentClipboard.cropApplied) {
+      setCropAppliedFor(activePhoto.id, { ...adjustmentClipboard.cropApplied })
+      setCropRectFor(activePhoto.id, null)
+      setStatus(`Pasted adjustments with crop to ${activePhoto.name}`)
+    } else {
+      setStatus(`Pasted adjustments to ${activePhoto.name}`)
     }
-    previewProxyRef.current.set(photo.id, proxy)
-    return proxy
+  }
+
+  const handleResetAdjustments = () => {
+    if (!activePhoto) return
+    recordHistory()
+    commitSettings({ ...NEUTRAL_SETTINGS })
+    setStatus(`Restored original appearance for ${activePhoto.name}`)
   }
 
   const handleAutoCorrect = async () => {
@@ -826,54 +568,35 @@ function App() {
       context.drawImage(image, 0, 0, sample.width, sample.height)
 
       const pixels = context.getImageData(0, 0, sample.width, sample.height).data
-      const luminanceHistogram = new Uint32Array(256)
+      const pixelCount = Math.max(1, pixels.length / 4)
       let redTotal = 0
       let greenTotal = 0
       let blueTotal = 0
-      let chromaTotal = 0
-      const pixelCount = pixels.length / 4
-
       for (let index = 0; index < pixels.length; index += 4) {
-        const red = pixels[index] / 255
-        const green = pixels[index + 1] / 255
-        const blue = pixels[index + 2] / 255
-        const luminance = Math.round((red * 0.299 + green * 0.587 + blue * 0.114) * 255)
-        luminanceHistogram[luminance] += 1
-        redTotal += red
-        greenTotal += green
-        blueTotal += blue
-        chromaTotal += Math.max(red, green, blue) - Math.min(red, green, blue)
+        redTotal += pixels[index] / 255
+        greenTotal += pixels[index + 1] / 255
+        blueTotal += pixels[index + 2] / 255
       }
 
-      const percentile = (fraction: number) => {
-        const target = pixelCount * fraction
-        let total = 0
-        for (let value = 0; value < luminanceHistogram.length; value += 1) {
-          total += luminanceHistogram[value]
-          if (total >= target) return value / 255
-        }
-        return 1
-      }
-
-      const range = Math.max(0.25, percentile(0.98) - percentile(0.02))
-      const averageChroma = chromaTotal / Math.max(1, pixelCount)
-      const averageRed = redTotal / Math.max(1, pixelCount)
-      const averageGreen = greenTotal / Math.max(1, pixelCount)
-      const averageBlue = blueTotal / Math.max(1, pixelCount)
-      const temperature = Math.min(0.25, Math.max(-0.25, (averageBlue - averageRed) * 0.5))
+      const averageRed = redTotal / pixelCount
+      const averageGreen = greenTotal / pixelCount
+      const averageBlue = blueTotal / pixelCount
+      const temperature = clamp((averageBlue - averageRed) * 0.5, -0.25, 0.25)
       const whiteBalancedLuminance =
         averageRed * (1 + temperature) * 0.299 +
         averageGreen * 0.587 +
         averageBlue * (1 - temperature) * 0.114
-      const nextSettings = {
-        exposure: Math.min(1.25, Math.max(1, 0.5 / Math.max(0.05, whiteBalancedLuminance))),
+
+      const corrected: AdjustmentSettings = {
+        ...(settingsByPhoto[photo.id] ?? defaultSettings),
+        exposure: clamp(0.5 / Math.max(0.05, whiteBalancedLuminance), 1, 1.25),
         brightness: 1.3,
         contrast: 1.1,
         levelsBlack: 0,
         levelsMid: 1,
         levelsWhite: 1,
         highlights: 1,
-        shadows: 0,
+        shadows: 1,
         saturation: 1.15,
         vibrance: 1,
         hue: 0,
@@ -884,98 +607,130 @@ function App() {
       }
 
       recordHistory()
-      const correctedSettings = { ...activeSettings, ...nextSettings }
-      setSettings(correctedSettings)
-      setSettingsByPhoto((current) => ({ ...current, [photo.id]: correctedSettings }))
+      setSettingsByPhoto((current) => ({ ...current, [photo.id]: corrected }))
       setStatus(`Auto color correction applied to ${photo.name}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Auto correction failed.')
     }
   }
 
-  const getCropRectPixels = (
-    sourceWidth: number,
-    sourceHeight: number,
-    crop: { x: number; y: number; width: number; height: number; rotation?: number },
-  ) => {
-    const x = Math.round(Math.min(Math.max(crop.x, 0), 1) * sourceWidth)
-    const y = Math.round(Math.min(Math.max(crop.y, 0), 1) * sourceHeight)
-    const width = Math.max(1, Math.round(Math.min(Math.max(crop.width, 0), 1) * sourceWidth))
-    const height = Math.max(1, Math.round(Math.min(Math.max(crop.height, 0), 1) * sourceHeight))
-
-    const cropX = Math.min(sourceWidth - 1, Math.max(0, x))
-    const cropY = Math.min(sourceHeight - 1, Math.max(0, y))
-    const cropWidth = Math.min(sourceWidth - cropX, width)
-    const cropHeight = Math.min(sourceHeight - cropY, height)
-
-    return {
-      x: cropX,
-      y: cropY,
-      width: Math.max(1, cropWidth),
-      height: Math.max(1, cropHeight),
-      rotation: crop.rotation ?? 0,
-    }
+  /* ---- Zoom / pan ---- */
+  const clampPan = (x: number, y: number) => {
+    const bounds = canvasPanelRef.current?.getBoundingClientRect()
+    if (!bounds) return { x, y }
+    // Keep the image center inside the panel so it can never be dragged out of reach.
+    return { x: clamp(x, -bounds.width / 2, bounds.width / 2), y: clamp(y, -bounds.height / 2, bounds.height / 2) }
   }
 
-  const createCroppedCanvas = (
-    sourceCanvas: HTMLCanvasElement,
-    crop: { x: number; y: number; width: number; height: number; rotation?: number },
-  ) => {
-    const pixelRect = getCropRectPixels(sourceCanvas.width, sourceCanvas.height, crop)
-    const croppedCanvas = document.createElement('canvas')
-    croppedCanvas.width = pixelRect.width
-    croppedCanvas.height = pixelRect.height
+  const applyZoom = useCallback((factor: number, anchor?: { x: number; y: number }) => {
+    const current = zoomRef.current
+    const next = clamp(Number((current * factor).toFixed(2)), MIN_ZOOM, MAX_ZOOM)
+    if (next === current) return
 
-    const context = croppedCanvas.getContext('2d', { alpha: false })
-    if (!context) {
-      return sourceCanvas
+    const point = anchor ?? lastPointerPositionRef.current
+    const ratio = next / current
+    const pan = panRef.current
+    const bounds = canvasPanelRef.current?.getBoundingClientRect()
+    let x = point.x - ratio * (point.x - pan.x)
+    let y = point.y - ratio * (point.y - pan.y)
+    if (bounds) {
+      x = clamp(x, -bounds.width / 2, bounds.width / 2)
+      y = clamp(y, -bounds.height / 2, bounds.height / 2)
     }
 
-    context.fillStyle = '#ffffff'
-    context.fillRect(0, 0, croppedCanvas.width, croppedCanvas.height)
-    context.imageSmoothingEnabled = true
-    context.drawImage(
-      sourceCanvas,
-      pixelRect.x,
-      pixelRect.y,
-      pixelRect.width,
-      pixelRect.height,
-      0,
-      0,
-      croppedCanvas.width,
-      croppedCanvas.height,
-    )
+    zoomRef.current = next
+    panRef.current = { x, y }
+    setZoom(next)
+    setPanOffset({ x, y })
+  }, [])
 
-    const rotation = ((pixelRect.rotation ?? 0) * Math.PI) / 180
-    if (Math.abs(rotation) < 0.0001) {
-      return croppedCanvas
-    }
-
-    const rotatedCanvas = document.createElement('canvas')
-    const baseWidth = croppedCanvas.width
-    const baseHeight = croppedCanvas.height
-    rotatedCanvas.width = Math.ceil(baseWidth * Math.abs(Math.cos(rotation)) + baseHeight * Math.abs(Math.sin(rotation)))
-    rotatedCanvas.height = Math.ceil(baseWidth * Math.abs(Math.sin(rotation)) + baseHeight * Math.abs(Math.cos(rotation)))
-
-    const rotatedContext = rotatedCanvas.getContext('2d', { alpha: false })
-    if (!rotatedContext) {
-      return croppedCanvas
-    }
-
-    rotatedContext.fillStyle = '#ffffff'
-    rotatedContext.fillRect(0, 0, rotatedCanvas.width, rotatedCanvas.height)
-    rotatedContext.translate(rotatedCanvas.width / 2, rotatedCanvas.height / 2)
-    rotatedContext.rotate(rotation)
-    rotatedContext.imageSmoothingEnabled = true
-    rotatedContext.drawImage(croppedCanvas, -baseWidth / 2, -baseHeight / 2)
-    return rotatedCanvas
+  const fitPreview = () => {
+    setZoom(1)
+    setPanOffset({ x: 0, y: 0 })
   }
+
+  useEffect(() => {
+    const panel = canvasPanelRef.current
+    if (!panel) return
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const bounds = panel.getBoundingClientRect()
+      const anchor = {
+        x: event.clientX - (bounds.left + bounds.width / 2),
+        y: event.clientY - (bounds.top + bounds.height / 2),
+      }
+      lastPointerPositionRef.current = anchor
+      applyZoom(event.deltaY < 0 ? 1.1 : 0.9, anchor)
+    }
+
+    panel.addEventListener('wheel', handleWheel, { passive: false })
+    return () => panel.removeEventListener('wheel', handleWheel)
+  }, [applyZoom])
+
+  // Reset the view and crop rotation whenever another photo becomes active.
+  useEffect(() => {
+    setZoom(1)
+    setPanOffset({ x: 0, y: 0 })
+    setCropRotation(activeCropApplied?.rotation ?? 0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePhoto?.id])
+
+  const handlePanPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (cropMode || zoom <= 1 || event.button !== 0) return
+
+    event.preventDefault()
+    const bounds = event.currentTarget.getBoundingClientRect()
+    lastPointerPositionRef.current = {
+      x: event.clientX - (bounds.left + bounds.width / 2),
+      y: event.clientY - (bounds.top + bounds.height / 2),
+    }
+    panDragRef.current = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      offsetX: panOffset.x,
+      offsetY: panOffset.y,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsPanning(true)
+  }
+
+  const handlePanPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    lastPointerPositionRef.current = {
+      x: event.clientX - (bounds.left + bounds.width / 2),
+      y: event.clientY - (bounds.top + bounds.height / 2),
+    }
+
+    const drag = panDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    setPanOffset(clampPan(drag.offsetX + event.clientX - drag.clientX, drag.offsetY + event.clientY - drag.clientY))
+  }
+
+  const handlePanPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panDragRef.current?.pointerId !== event.pointerId) return
+    panDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    setIsPanning(false)
+  }
+
+  /* ---- Preview rendering ---- */
+  useEffect(() => {
+    if (!photos.length) {
+      setSelectedPhotoIndex(0)
+      return
+    }
+    setSelectedPhotoIndex((current) => Math.min(current, photos.length - 1))
+  }, [photos.length])
 
   useEffect(() => {
     const canvas = previewCanvasRef.current
     if (!canvas) return
 
-    if (!photos.length) {
+    if (!activePhoto) {
       canvas.width = 720
       canvas.height = 420
       const context = canvas.getContext('2d')
@@ -987,16 +742,12 @@ function App() {
       context.font = '300 22px Arial'
       context.textAlign = 'center'
       context.fillText('No photo loaded yet', canvas.width / 2, canvas.height / 2)
-      setHistogram(new Array(32).fill(0))
+      setHistogram(EMPTY_HISTOGRAM)
       return
     }
 
-    const activePhoto = photos[selectedPhotoIndex] ?? photos[0]
     let cancelled = false
-
-    if (renderRafRef.current) {
-      cancelAnimationFrame(renderRafRef.current)
-    }
+    if (renderRafRef.current) cancelAnimationFrame(renderRafRef.current)
 
     renderRafRef.current = requestAnimationFrame(() => {
       loadImageResource(activePhoto.url)
@@ -1004,82 +755,56 @@ function App() {
           if (cancelled) return
 
           const proxy = getOrCreateProxy(activePhoto, image)
-
-          let processed: HTMLCanvasElement
-          if (showOriginalPreview) {
-            processed = proxy
-          } else {
-            processed = await renderProcessedImage(proxy, settingsByPhoto[activePhoto.id] ?? settings)
-          }
+          const processed = showOriginalPreview ? proxy : await renderProcessedImage(proxy, activeSettings)
           if (cancelled) return
-          const targetCanvas = previewCanvasRef.current
-          if (!targetCanvas) return
 
-          const maxWidth = 980
-          const maxHeight = 520
-
+          const target = previewCanvasRef.current
+          if (!target) return
           processedPreviewCanvasRef.current = processed
 
-          const activeCropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
-          const displayCanvas = !cropMode && activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
+          const display = !cropMode && activeCropApplied ? createCroppedCanvas(processed, activeCropApplied) : processed
+          const scale = Math.min(980 / display.width, 520 / display.height, 1)
+          target.width = Math.max(1, Math.round(display.width * scale))
+          target.height = Math.max(1, Math.round(display.height * scale))
 
-          const scale = Math.min(maxWidth / displayCanvas.width, maxHeight / displayCanvas.height, 1)
-          targetCanvas.width = Math.max(1, Math.round(displayCanvas.width * scale))
-          targetCanvas.height = Math.max(1, Math.round(displayCanvas.height * scale))
-
-          const context = targetCanvas.getContext('2d')
+          const context = target.getContext('2d')
           if (!context) return
-
-          context.clearRect(0, 0, targetCanvas.width, targetCanvas.height)
+          context.clearRect(0, 0, target.width, target.height)
           context.imageSmoothingEnabled = true
           context.imageSmoothingQuality = 'high'
-          context.drawImage(displayCanvas, 0, 0, targetCanvas.width, targetCanvas.height)
+          context.drawImage(display, 0, 0, target.width, target.height)
 
-          if (cropMode && cropRect) {
-            drawCropOverlay(targetCanvas, processed, cropRect, true, cropAspect)
+          if (cropMode && cropRectRef.current) {
+            drawCropOverlay(target, processed, cropRectRef.current, true, cropAspect)
           }
 
-          setHistogram(getHistogram(targetCanvas))
+          setHistogram(getHistogram(target))
         })
         .catch((error) => {
-          if (!cancelled) {
-            setStatus(error instanceof Error ? error.message : 'Unable to render the selected photo.')
-          }
+          if (!cancelled) setStatus(error instanceof Error ? error.message : 'Unable to render the selected photo.')
         })
     })
 
     return () => {
       cancelled = true
-      if (renderRafRef.current) {
-        cancelAnimationFrame(renderRafRef.current)
-      }
+      if (renderRafRef.current) cancelAnimationFrame(renderRafRef.current)
     }
+    // cropAspect / crop rect changes are handled by the overlay effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    photos,
-    cropAppliedByPhoto,
-    cropRotation,
-    settings,
-    settingsByPhoto,
-    selectedPhotoIndex,
-    showOriginalPreview,
-    cropMode,
-  ])
+  }, [activePhoto, activeSettings, activeCropApplied, showOriginalPreview, cropMode])
 
+  // Redraw only the crop overlay while cropping. (Outside crop mode the effect above owns the canvas,
+  // otherwise the uncropped image would flash onto a cropped canvas.)
   useEffect(() => {
     const canvas = previewCanvasRef.current
-    const sourceCanvas = processedPreviewCanvasRef.current
-    if (!canvas || !sourceCanvas) {
-      return
-    }
-
-    drawCropOverlay(canvas, sourceCanvas, cropRect, cropMode, cropAspect)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const source = processedPreviewCanvasRef.current
+    if (!cropMode || !canvas || !source) return
+    drawCropOverlay(canvas, source, cropRect, true, cropAspect)
   }, [cropMode, cropRect, cropAspect])
 
+  /* ---- Crop interaction ---- */
   const getCropHandleAtPoint = (x: number, y: number): CropHandle | null => {
     if (!cropRect) return null
-
     const left = Math.min(cropRect.x, cropRect.x + cropRect.width)
     const top = Math.min(cropRect.y, cropRect.y + cropRect.height)
     const right = Math.max(cropRect.x, cropRect.x + cropRect.width)
@@ -1093,286 +818,120 @@ function App() {
     ]
 
     const hitRadius = 14
-    const found = handles.find((handle) => Math.abs(x - handle.x) <= hitRadius && Math.abs(y - handle.y) <= hitRadius)
-    return found?.key ?? null
+    return handles.find((h) => Math.abs(x - h.x) <= hitRadius && Math.abs(y - h.y) <= hitRadius)?.key ?? null
   }
 
-  const getCropCursorAtPoint = (x: number, y: number) => {
-    if (!cropRect) {
-      return 'crosshair'
-    }
-
+  const getCropCursorAtPoint = (x: number, y: number): CropCursor => {
+    if (!cropRect) return 'crosshair'
     const handle = getCropHandleAtPoint(x, y)
-    if (handle === 'nw' || handle === 'se') {
-      return 'nwse-resize'
-    }
-    if (handle === 'ne' || handle === 'sw') {
-      return 'nesw-resize'
-    }
+    if (handle === 'nw' || handle === 'se') return 'nwse-resize'
+    if (handle === 'ne' || handle === 'sw') return 'nesw-resize'
     if (x >= cropRect.x && x <= cropRect.x + cropRect.width && y >= cropRect.y && y <= cropRect.y + cropRect.height) {
       return 'move'
     }
-
     return 'crosshair'
   }
 
   const getCanvasPointerPosition = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = previewCanvasRef.current
-    if (!canvas) {
-      return { x: 0, y: 0 }
-    }
-
+    if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-
     return {
-      x: (event.clientX - rect.left) * scaleX,
-      y: (event.clientY - rect.top) * scaleY,
+      x: (event.clientX - rect.left) * (canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (canvas.height / rect.height),
     }
   }
 
   const handleCropPointerDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!cropMode || !previewCanvasRef.current || photos.length === 0) {
-      return
-    }
-
-    if (event.button !== 0) {
-      return
-    }
+    if (!cropMode || !previewCanvasRef.current || !activePhoto || event.button !== 0) return
 
     event.preventDefault()
     event.stopPropagation()
-
     const { x, y } = getCanvasPointerPosition(event)
 
     if (cropRect) {
-      const activeHandle = getCropHandleAtPoint(x, y)
-      if (activeHandle) {
-        cropDragRef.current = {
-          mode: 'resize',
-          handle: activeHandle,
-          startX: x,
-          startY: y,
-          startRect: cropRect,
-        }
+      const handle = getCropHandleAtPoint(x, y)
+      if (handle) {
+        cropDragRef.current = { mode: 'resize', handle, startX: x, startY: y, startRect: cropRect }
         return
       }
 
-      const left = Math.min(cropRect.x, cropRect.x + cropRect.width)
-      const top = Math.min(cropRect.y, cropRect.y + cropRect.height)
-      const right = Math.max(cropRect.x, cropRect.x + cropRect.width)
-      const bottom = Math.max(cropRect.y, cropRect.y + cropRect.height)
-
-      if (x >= left && x <= right && y >= top && y <= bottom) {
-        cropDragRef.current = {
-          mode: 'move',
-          startX: x,
-          startY: y,
-          startRect: cropRect,
-        }
+      if (x >= cropRect.x && x <= cropRect.x + cropRect.width && y >= cropRect.y && y <= cropRect.y + cropRect.height) {
+        cropDragRef.current = { mode: 'move', startX: x, startY: y, startRect: cropRect }
         return
       }
     }
 
-    cropStartRef.current = { x, y }
-    cropDragRef.current = {
-      mode: 'new',
-      startX: x,
-      startY: y,
-      startRect: { x, y, width: 0, height: 0 },
-    }
-    const nextRect = { x, y, width: 0, height: 0 }
-    setCropRect(nextRect)
-    if (activePhoto) {
-      setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: nextRect }))
-    }
+    const startRect = { x, y, width: 0, height: 0 }
+    cropDragRef.current = { mode: 'new', startX: x, startY: y, startRect }
+    setCropRectFor(activePhoto.id, startRect)
   }
 
   const handleCropPointerMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!cropMode || !previewCanvasRef.current) {
-      return
-    }
+    const canvas = previewCanvasRef.current
+    if (!cropMode || !canvas || !activePhoto) return
 
     const { x, y } = getCanvasPointerPosition(event)
-
-    if (!cropDragRef.current) {
+    const drag = cropDragRef.current
+    if (!drag) {
       setCropCursor(getCropCursorAtPoint(x, y))
       return
     }
 
-    const drag = cropDragRef.current
-    const canvasWidth = previewCanvasRef.current.width
-    const canvasHeight = previewCanvasRef.current.height
     const aspectRatio = getAspectValue(cropAspect)
-
-    let nextRect: { x: number; y: number; width: number; height: number }
+    let nextRect: CropRect
 
     if (drag.mode === 'new') {
-      const left = Math.min(drag.startX, x)
-      const top = Math.min(drag.startY, y)
-      const width = Math.max(10, Math.abs(x - drag.startX))
-      const height = Math.max(10, Math.abs(y - drag.startY))
-      nextRect = clampCropRectToCanvas({ x: left, y: top, width, height }, canvasWidth, canvasHeight, aspectRatio)
-    } else if (drag.mode === 'move') {
-      const dx = x - drag.startX
-      const dy = y - drag.startY
       nextRect = clampCropRectToCanvas(
         {
-          x: drag.startRect.x + dx,
-          y: drag.startRect.y + dy,
+          x: Math.min(drag.startX, x),
+          y: Math.min(drag.startY, y),
+          width: Math.max(10, Math.abs(x - drag.startX)),
+          height: Math.max(10, Math.abs(y - drag.startY)),
+        },
+        canvas.width,
+        canvas.height,
+        aspectRatio,
+      )
+    } else if (drag.mode === 'move') {
+      nextRect = clampCropRectToCanvas(
+        {
+          x: drag.startRect.x + (x - drag.startX),
+          y: drag.startRect.y + (y - drag.startY),
           width: drag.startRect.width,
           height: drag.startRect.height,
         },
-        canvasWidth,
-        canvasHeight,
+        canvas.width,
+        canvas.height,
       )
-    } else if (drag.mode === 'resize' && drag.handle) {
-      const startRect = drag.startRect
-      const MIN_SIZE = 10
-      const anchor = {
-        nw: { x: startRect.x + startRect.width, y: startRect.y + startRect.height },
-        ne: { x: startRect.x, y: startRect.y + startRect.height },
-        sw: { x: startRect.x + startRect.width, y: startRect.y },
-        se: { x: startRect.x, y: startRect.y },
-      }[drag.handle]
-
-      let left = anchor.x
-      let top = anchor.y
-      let right = anchor.x
-      let bottom = anchor.y
-
-      if (drag.handle === 'nw') {
-        left = Math.min(x, anchor.x - MIN_SIZE)
-        top = Math.min(y, anchor.y - MIN_SIZE)
-        right = anchor.x
-        bottom = anchor.y
-      } else if (drag.handle === 'ne') {
-        right = Math.max(x, anchor.x + MIN_SIZE)
-        top = Math.min(y, anchor.y - MIN_SIZE)
-        left = anchor.x
-        bottom = anchor.y
-      } else if (drag.handle === 'sw') {
-        left = Math.min(x, anchor.x - MIN_SIZE)
-        bottom = Math.max(y, anchor.y + MIN_SIZE)
-        right = anchor.x
-        top = anchor.y
-      } else if (drag.handle === 'se') {
-        right = Math.max(x, anchor.x + MIN_SIZE)
-        bottom = Math.max(y, anchor.y + MIN_SIZE)
-        left = anchor.x
-        top = anchor.y
-      }
-
-      let width = Math.abs(right - left)
-      let height = Math.abs(bottom - top)
-
-      if (width < MIN_SIZE) {
-        width = MIN_SIZE
-      }
-      if (height < MIN_SIZE) {
-        height = MIN_SIZE
-      }
-
-      if (aspectRatio) {
-        if (drag.handle === 'nw' || drag.handle === 'se') {
-          if (drag.handle === 'nw') {
-            const adjustedWidth = height * aspectRatio
-            width = Math.min(width, adjustedWidth)
-            height = width / aspectRatio
-            left = Math.min(anchor.x - width, anchor.x - MIN_SIZE)
-            top = anchor.y - height
-          } else {
-            const adjustedWidth = height * aspectRatio
-            width = Math.min(width, adjustedWidth)
-            height = width / aspectRatio
-            right = anchor.x + width
-            bottom = anchor.y + height
-          }
-        } else {
-          if (drag.handle === 'ne') {
-            const adjustedHeight = width / aspectRatio
-            height = Math.min(height, adjustedHeight)
-            width = height * aspectRatio
-            right = anchor.x + width
-            top = anchor.y - height
-          } else {
-            const adjustedHeight = width / aspectRatio
-            height = Math.min(height, adjustedHeight)
-            width = height * aspectRatio
-            left = anchor.x - width
-            bottom = anchor.y + height
-          }
-        }
-      }
-
-      if (drag.handle === 'nw') {
-        nextRect = {
-          x: left,
-          y: top,
-          width: anchor.x - left,
-          height: anchor.y - top,
-        }
-      } else if (drag.handle === 'ne') {
-        nextRect = {
-          x: anchor.x,
-          y: top,
-          width: right - anchor.x,
-          height: anchor.y - top,
-        }
-      } else if (drag.handle === 'sw') {
-        nextRect = {
-          x: left,
-          y: anchor.y,
-          width: anchor.x - left,
-          height: bottom - anchor.y,
-        }
-      } else {
-        nextRect = {
-          x: anchor.x,
-          y: anchor.y,
-          width: right - anchor.x,
-          height: bottom - anchor.y,
-        }
-      }
-
-      nextRect = clampCropRectToCanvas(nextRect, canvasWidth, canvasHeight, aspectRatio)
+    } else if (drag.handle) {
+      nextRect = resizeCropRect(drag.handle, drag.startRect, x, y, canvas.width, canvas.height, aspectRatio)
     } else {
       return
     }
 
-    const rectIsUnchanged =
+    const unchanged =
       cropRect &&
       Math.abs(nextRect.x - cropRect.x) < 0.5 &&
       Math.abs(nextRect.y - cropRect.y) < 0.5 &&
       Math.abs(nextRect.width - cropRect.width) < 0.5 &&
       Math.abs(nextRect.height - cropRect.height) < 0.5
 
-    if (rectIsUnchanged) {
+    if (unchanged) {
       setCropCursor(getCropCursorAtPoint(x, y))
       return
     }
 
-    setCropRect(nextRect)
-    if (activePhoto) {
-      setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: nextRect }))
-    }
+    setCropRectFor(activePhoto.id, nextRect)
     setCropCursor(getCropCursorAtPoint(x, y))
-    const canvas = previewCanvasRef.current
-    const sourceCanvas = processedPreviewCanvasRef.current
-    if (canvas && sourceCanvas) {
-      drawCropOverlay(canvas, sourceCanvas, nextRect, true, cropAspect)
-    }
+    const source = processedPreviewCanvasRef.current
+    if (source) drawCropOverlay(canvas, source, nextRect, true, cropAspect)
   }
 
   const handleCropPointerUp = () => {
     cropDragRef.current = null
-    cropStartRef.current = null
-    if (cropRect && (cropRect.width < 8 || cropRect.height < 8)) {
-      setCropRect(null)
-      if (activePhoto) {
-        setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: null }))
-      }
+    if (activePhoto && cropRect && (cropRect.width < 8 || cropRect.height < 8)) {
+      setCropRectFor(activePhoto.id, null)
     }
     setCropCursor('crosshair')
   }
@@ -1383,82 +942,56 @@ function App() {
   }
 
   const handleCropApply = () => {
-    if (!cropRect) {
+    if (!activePhoto || !cropRect) {
       setStatus('Create a crop selection first.')
       return
     }
 
     const canvasWidth = previewCanvasRef.current?.width ?? 1
     const canvasHeight = previewCanvasRef.current?.height ?? 1
-    const nextApplied = {
+    recordHistory()
+    setCropAppliedFor(activePhoto.id, {
       x: cropRect.x / canvasWidth,
       y: cropRect.y / canvasHeight,
       width: cropRect.width / canvasWidth,
       height: cropRect.height / canvasHeight,
       rotation: cropRotation,
-    }
-    recordHistory()
-    setCropApplied(nextApplied)
-    syncSelectedCropState(null, nextApplied)
+    })
+    setCropRectFor(activePhoto.id, null)
     setCropMode(false)
-    setCropRect(null)
     setStatus('Crop applied to the selected image.')
   }
 
   const handleCropClear = () => {
     recordHistory()
-    setCropApplied(null)
-    setCropRect(null)
     if (activePhoto) {
-      setCropRectByPhoto((current) => ({ ...current, [activePhoto.id]: null }))
-      setCropAppliedByPhoto((current) => ({ ...current, [activePhoto.id]: null }))
+      setCropRectFor(activePhoto.id, null)
+      setCropAppliedFor(activePhoto.id, null)
     }
     setCropMode(false)
     setCropRotation(0)
     setStatus('Crop removed.')
   }
 
-  const handleProcessWithRust = async () => {
-    if (photos.length === 0) {
-      setStatus('Select at least one photo before processing.')
-      return
-    }
+  /* ---- Export ---- */
+  /** Builds one photo "card" (processed, cropped, fitted to the photo opening).
+   *  Used by both the real export and the export preview, so they always match. */
+  const buildCard: BuildCard = useCallback(
+    async (photo, targetWidth, targetHeight, { preview, blurRadius }) => {
+      const image = await loadImageResource(photo.url)
+      const source = preview ? getOrCreateProxy(photo, image) : image
+      const processed = await renderProcessedImage(source, settingsByPhoto[photo.id] ?? defaultSettings)
+      const crop = cropAppliedByPhoto[photo.id] ?? null
+      const cropped = crop ? createCroppedCanvas(processed, crop) : processed
 
-    setProcessing(true)
-    setStatus('Sending files to the Rust image engine…')
-
-    try {
-      if (!window.polaroidEngine?.processImages) {
-        setStatus('Rust bridge unavailable in this environment; using preview-only mode.')
-        return
-      }
-
-      const result = await window.polaroidEngine.processImages({
-        files: photos.map((photo) => photo.path),
-        settings: {
-          exposure: settings.exposure,
-          contrast: settings.contrast,
-          gamma: 1,
-          sharpen: settings.sharpen,
-          autoRotate: true,
-          format: 'jpeg',
-          dpi: 300,
-        },
-      })
-
-      if (!result?.ok) {
-        throw new Error(result?.error ?? 'Rust processing failed.')
-      }
-
-      setLastOutputDir(result.outputDir ?? null)
-      setStatus(result.message ?? 'Rust processing completed successfully.')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown processing error.'
-      setStatus(message)
-    } finally {
-      setProcessing(false)
-    }
-  }
+      // Every photo is fitted to the photo opening so it can never be stretched.
+      // Change 'contain' to 'cover' to fill the whole opening (edges get trimmed).
+      return fillBlur
+        ? createBlurFillCanvas(cropped, targetWidth, targetHeight, exportAutoRotate, blurRadius)
+        : createFitCanvas(cropped, targetWidth, targetHeight, exportAutoRotate, 'contain')
+    },
+    [loadImageResource, getOrCreateProxy, settingsByPhoto, cropAppliedByPhoto, fillBlur, exportAutoRotate],
+  )
 
   const handleExportSheet = async () => {
     if (photos.length === 0) {
@@ -1470,39 +1003,23 @@ function App() {
     setStatus('Processing images and building export sheet…')
 
     try {
-      const images: (HTMLImageElement | HTMLCanvasElement)[] = []
-
+      const { photoW, photoH } = PRESETS[preset]
+      const images: HTMLCanvasElement[] = []
       for (const photo of photos) {
-        const image = await loadImageResource(photo.url)
-        const photoSettings = settingsByPhoto[photo.id] ?? settings
-        const processed = await renderProcessedImage(image, photoSettings)
-        const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
-        const cropped = photoCropApplied ? createCroppedCanvas(processed, photoCropApplied) : processed
-        const { photoW, photoH } = PRESETS[preset]
-
-        // Every photo is handed to the sheet already fitted to the photo opening,
-        // so it can never be stretched. Change 'contain' to 'cover' if you prefer
-        // the photo to fill the whole opening (edges get trimmed).
-        images.push(
-          fillBlur
-            ? createBlurFillCanvas(cropped, photoW, photoH, exportAutoRotate)
-            : createFitCanvas(cropped, photoW, photoH, exportAutoRotate, 'contain'),
-        )
+        images.push(await buildCard(photo, photoW, photoH, { preview: false }))
       }
 
-      const layoutInfo = buildSheetLayout(PRESETS[preset], 1, paperSize)
-      const maxImagesPerPage = layoutInfo.cols * layoutInfo.rows
+      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+      const maxImagesPerPage = layout.cols * layout.rows
+      const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
 
       const dataUrls: string[] = []
-
       for (let i = 0; i < images.length; i += maxImagesPerPage) {
-        const chunk = images.slice(i, i + maxImagesPerPage)
-        const sheet = await renderSheet(chunk, preset, defaultSettings, paperSize, exportAutoRotate)
-        const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
+        const sheet = await renderSheet(images.slice(i, i + maxImagesPerPage), preset, defaultSettings, paperSize, exportAutoRotate)
         dataUrls.push(sheet.toDataURL(mimeType))
       }
 
-      const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat === 'pdf' ? 'pdf' : exportFormat}`
+      const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat}`
 
       const saveResult = await window.polaroidEngine?.saveExport?.({
         dataUrls,
@@ -1511,17 +1028,18 @@ function App() {
         dpi: 300,
       })
 
-      if (saveResult && (!saveResult.canceled && saveResult.ok)) {
+      if (saveResult && !saveResult.canceled && saveResult.ok) {
         setLastOutputDir(saveResult.filePath ?? null)
         setStatus(`Exported ${images.length} image(s) to ${saveResult.filePath ?? 'a printable sheet'}.`)
         return
       }
 
-      if (saveResult && saveResult.canceled) {
+      if (saveResult?.canceled) {
         setStatus('Export cancelled.')
         return
       }
 
+      // Browser fallback: download each sheet.
       dataUrls.forEach((dataUrl, idx) => {
         const anchor = document.createElement('a')
         anchor.href = dataUrl
@@ -1542,7 +1060,6 @@ function App() {
       setStatus('Select at least one photo before exporting.')
       return
     }
-
     setShowExportDialog(true)
     setExportPreviewPage(0)
   }
@@ -1552,188 +1069,103 @@ function App() {
     await handleExportSheet()
   }
 
-  const exportMaxImagesPerPage = useMemo(() => {
-    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
-    return layout.cols * layout.rows
-  }, [preset, paperSize])
-
-  const exportTotalPages = Math.max(1, Math.ceil(photos.length / exportMaxImagesPerPage))
-
-  useEffect(() => {
-    const canvas = exportPreviewCanvasRef.current
-    if (!canvas || !showExportDialog || photos.length === 0) {
+  const handleProcessWithRust = async () => {
+    if (photos.length === 0) {
+      setStatus('Select at least one photo before processing.')
       return
     }
 
-    let cancelled = false
+    setProcessing(true)
+    setStatus('Sending files to the Rust image engine…')
 
-    const renderPreview = async () => {
-      try {
-        const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
-
-        const currentPage = Math.min(exportPreviewPage, Math.max(0, exportTotalPages - 1))
-        const startIndex = currentPage * exportMaxImagesPerPage
-        const endIndex = Math.min(startIndex + exportMaxImagesPerPage, photos.length)
-        const photosToRender = photos.slice(startIndex, endIndex)
-
-        const targetW = exportOrientation === 'landscape' ? 640 : 440
-        const targetH = exportOrientation === 'landscape' ? 440 : 640
-        const previewScale = Math.min(targetW / layout.sheetW, targetH / layout.sheetH, 0.25)
-        const sheetW = Math.max(1, Math.round(layout.sheetW * previewScale))
-        const sheetH = Math.max(1, Math.round(layout.sheetH * previewScale))
-
-        const previewCards: Array<{ canvas: HTMLCanvasElement; fillBlur: boolean }> = []
-        for (const [index, photo] of photosToRender.entries()) {
-          try {
-            const actualIndex = startIndex + index
-            const image = await loadImageResource(photo.url)
-            const proxy = getOrCreateProxy(photo, image)
-            const processed = await renderProcessedImage(proxy, settingsByPhoto[photo.id] ?? settings)
-            const photoCropApplied = cropAppliedByPhoto[photo.id] ?? null
-
-            const cardSource = actualIndex === selectedPhotoIndex && photoCropApplied
-              ? createCroppedCanvas(processed, photoCropApplied)
-              : processed
-
-            previewCards.push({ canvas: cardSource, fillBlur })
-          } catch {
-            continue
-          }
-        }
-
-        if (!previewCards.length || cancelled) {
-          return
-        }
-
-        const previewPreset = {
-          ...PRESETS[preset],
-          frameW: Math.round(PRESETS[preset].frameW * previewScale),
-          frameH: Math.round(PRESETS[preset].frameH * previewScale),
-          photoW: Math.round(PRESETS[preset].photoW * previewScale),
-          photoH: Math.round(PRESETS[preset].photoH * previewScale),
-          offsetX: Math.round(PRESETS[preset].offsetX * previewScale),
-          offsetY: Math.round(PRESETS[preset].offsetY * previewScale),
-        }
-
-        const sheet = document.createElement('canvas')
-        sheet.width = sheetW
-        sheet.height = sheetH
-        const sCtx = sheet.getContext('2d')
-        if (!sCtx) return
-
-        sCtx.fillStyle = '#ffffff'
-        sCtx.fillRect(0, 0, sheetW, sheetH)
-
-        const usedCols = Math.max(1, Math.ceil(previewCards.length / layout.rows))
-        const usedRows = usedCols > 1 ? layout.rows : Math.max(1, previewCards.length)
-        const marginX = (sheetW - usedCols * previewPreset.frameW) / 2
-        const marginY = (sheetH - usedRows * previewPreset.frameH) / 2
-
-        for (let i = 0; i < previewCards.length; i += 1) {
-          const col = Math.floor(i / layout.rows)
-          const row = i % layout.rows
-          const x = marginX + col * previewPreset.frameW
-          const y = marginY + row * previewPreset.frameH
-
-          const previewCard = previewCards[i]
-          const pCard = previewCard.canvas
-          const isLandscape = pCard.width >= pCard.height
-          const cardIsLandscape = previewPreset.frameW >= previewPreset.frameH
-          const shouldRotate = exportAutoRotate && isLandscape !== cardIsLandscape
-
-          let rotatedSource: HTMLCanvasElement = pCard
-          if (shouldRotate) {
-            const rot = document.createElement('canvas')
-            rot.width = pCard.height
-            rot.height = pCard.width
-            const rCtx = rot.getContext('2d')
-            if (rCtx) {
-              rCtx.translate(rot.width / 2, rot.height / 2)
-              rCtx.rotate(((isLandscape ? 1 : -1) * 90 * Math.PI) / 180)
-              rCtx.drawImage(pCard, -pCard.width / 2, -pCard.height / 2)
-              rotatedSource = rot
-            }
-          }
-
-          if (previewCard.fillBlur) {
-            const blurredPhoto = createBlurFillCanvas(rotatedSource, previewPreset.photoW, previewPreset.photoH)
-            // Keep the blurred fill strictly inside the photo opening; the surrounding frame stays white.
-            sCtx.fillStyle = '#ffffff'
-            sCtx.fillRect(x, y, previewPreset.frameW, previewPreset.frameH)
-            sCtx.drawImage(blurredPhoto, x + previewPreset.offsetX, y + previewPreset.offsetY, previewPreset.photoW, previewPreset.photoH)
-          } else {
-            const fit = fitImageToFrame(rotatedSource.width, rotatedSource.height, previewPreset)
-            sCtx.drawImage(rotatedSource, x + fit.offsetX, y + fit.offsetY, fit.width, fit.height)
-          }
-        }
-
-        sCtx.strokeStyle = '#000000'
-        sCtx.lineWidth = 1
-        const markLen = Math.round(layout.markLength * previewScale)
-        const gridW = usedCols * previewPreset.frameW
-        const gridH = usedRows * previewPreset.frameH
-
-        for (let i = 0; i <= usedCols; i += 1) {
-          const x = marginX + i * previewPreset.frameW
-          sCtx.beginPath()
-          sCtx.moveTo(x, marginY - markLen)
-          sCtx.lineTo(x, marginY)
-          sCtx.moveTo(x, marginY + gridH)
-          sCtx.lineTo(x, marginY + gridH + markLen)
-          sCtx.stroke()
-        }
-        for (let i = 0; i <= usedRows; i += 1) {
-          const y = marginY + i * previewPreset.frameH
-          sCtx.beginPath()
-          sCtx.moveTo(marginX - markLen, y)
-          sCtx.lineTo(marginX, y)
-          sCtx.moveTo(marginX + gridW, y)
-          sCtx.lineTo(marginX + gridW + markLen, y)
-          sCtx.stroke()
-        }
-
-        const previewWidth = exportOrientation === 'landscape' ? Math.max(sheetW + 60, 560) : Math.max(sheetW + 60, 400)
-        const previewHeight = exportOrientation === 'landscape' ? Math.max(sheetH + 60, 360) : Math.max(sheetH + 60, 500)
-
-        canvas.width = previewWidth
-        canvas.height = previewHeight
-        const context = canvas.getContext('2d')
-        if (!context || cancelled) {
-          return
-        }
-
-        context.fillStyle = '#ffffff'
-        context.fillRect(0, 0, canvas.width, canvas.height)
-
-        const baseX = (canvas.width - sheet.width) / 2
-        const baseY = (canvas.height - sheet.height) / 2
-
-        context.fillStyle = '#ffffff'
-        context.fillRect(baseX - 10, baseY - 10, sheet.width + 20, sheet.height + 20)
-        context.drawImage(sheet, baseX, baseY)
-
-        context.fillStyle = '#e6f3ff'
-        context.font = '600 14px Arial'
-        context.textAlign = 'left'
-        context.fillText(`Pages: ${exportPageCount}`, 16, 26)
-        context.fillText(`Orientation: ${exportOrientation}`, 16, 46)
-        context.fillText(`Auto rotate: ${exportAutoRotate ? 'On' : 'Off'}`, 16, 66)
-      } catch {
-        if (!cancelled) {
-          setStatus('Unable to build the export preview.')
-        }
+    try {
+      if (!window.polaroidEngine?.processImages) {
+        setStatus('Rust bridge unavailable in this environment; using preview-only mode.')
+        return
       }
+
+      // The bridge takes one settings object per call, so photos that share the same
+      // exposure / contrast / sharpen are sent together and each group uses its own values.
+      const groups = new Map<string, { settings: AdjustmentSettings; files: string[] }>()
+      for (const photo of photos) {
+        const photoSettings = settingsByPhoto[photo.id] ?? defaultSettings
+        const key = `${photoSettings.exposure}|${photoSettings.contrast}|${photoSettings.sharpen}`
+        const group = groups.get(key) ?? { settings: photoSettings, files: [] }
+        group.files.push(photo.path)
+        groups.set(key, group)
+      }
+
+      let lastMessage: string | undefined
+      for (const { settings, files } of groups.values()) {
+        const result = await window.polaroidEngine.processImages({
+          files,
+          settings: {
+            exposure: settings.exposure,
+            contrast: settings.contrast,
+            gamma: 1,
+            sharpen: settings.sharpen,
+            autoRotate: true,
+            format: 'jpeg',
+            dpi: 300,
+          },
+        })
+
+        if (!result?.ok) throw new Error(result?.error ?? 'Rust processing failed.')
+        setLastOutputDir(result.outputDir ?? null)
+        lastMessage = result.message
+      }
+
+      setStatus(lastMessage ?? 'Rust processing completed successfully.')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unknown processing error.')
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  /* ---- Keyboard shortcuts ---- */
+  shortcutRef.current = (event) => {
+    const target = event.target as HTMLElement | null
+    const tag = target?.tagName
+    const inputType = (target as HTMLInputElement | null)?.type
+    const isRange = tag === 'INPUT' && inputType === 'range'
+    const isTyping = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !isRange && inputType !== 'checkbox')
+    const mod = event.ctrlKey || event.metaKey
+    const key = event.key.toLowerCase()
+
+    if (mod && (key === 'z' || key === 'y')) {
+      if (isTyping || showExportDialog) return
+      event.preventDefault()
+      if (key === 'y' || event.shiftKey) handleRedo()
+      else handleUndo()
+      return
     }
 
-    renderPreview()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cropAppliedByPhoto, exportOrientation, exportPageCount, exportAutoRotate, paperSize, photos, preset, selectedPhotoIndex, settings, settingsByPhoto, showExportDialog, exportPreviewPage, exportMaxImagesPerPage, exportTotalPages, fillBlur])
+    if (event.key === 'Escape') {
+      if (showExportDialog) {
+        setShowExportDialog(false)
+      } else if (cropMode) {
+        setCropMode(false)
+        if (activePhoto) setCropRectFor(activePhoto.id, null)
+      }
+      return
+    }
 
+    if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !mod && !isTyping && !isRange && !showExportDialog) {
+      event.preventDefault()
+      selectPhoto(clamp(selectedPhotoIndex + (event.key === 'ArrowLeft' ? -1 : 1), 0, photos.length - 1))
+    }
+  }
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => shortcutRef.current(event)
+    window.addEventListener('keydown', listener)
+    return () => window.removeEventListener('keydown', listener)
+  }, [])
+
+  /* ---- Render ---- */
   const operationSummary = buildAdjustmentOperations(activeSettings)
-  const stageLabel = activePhoto
-    ? `${photos.length} photo${photos.length === 1 ? '' : 's'} | ${activePhoto.name}`
-    : ''
+  const stageLabel = activePhoto ? `${photos.length} photo${photos.length === 1 ? '' : 's'} | ${activePhoto.name}` : ''
 
   return (
     <div className="app dark">
@@ -1749,17 +1181,19 @@ function App() {
       <div className="window-shell">
         <div className="menu-bar">
           <button title="Add photos" onClick={handleOpenNativeDialog}>Add Photos</button>
+          <button
+            title="Auto color correction on import"
+            aria-pressed={applyAutoCorrectionOnImport}
+            onClick={() => setApplyAutoCorrectionOnImport((current) => !current)}
+            className={`import-toggle ${applyAutoCorrectionOnImport ? 'active' : ''}`}
+          >
+            Auto-correct import {applyAutoCorrectionOnImport ? '✓' : '✗'}
+          </button>
           <button title="Open project" onClick={handleOpenProject}>Open Project</button>
           <button title="Save project" onClick={handleSaveProject}>Save Project</button>
-          <button title="Clear current selection" onClick={() => {
-            setPhotos([])
-            setLastOutputDir(null)
-            setUndoStack([])
-            setRedoStack([])
-            setStatus('No photos added yet')
-          }}>New</button>
-          <button title="Undo" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
-          <button title="Redo" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>
+          <button title="Clear current selection" onClick={handleNew}>New</button>
+          <button title="Undo (Ctrl+Z)" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
+          <button title="Redo (Ctrl+Shift+Z)" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>
           <button title="Export print sheet" onClick={openExportDialog}>Export</button>
           <button title="Run Rust process" onClick={handleProcessWithRust} disabled={processing}>{processing ? 'Processing…' : 'Process'}</button>
         </div>
@@ -1767,8 +1201,17 @@ function App() {
         <div className="workspace-shell">
           <aside className="tool-rail">
             <div className="tool-group">
-              <button title="Select" className={`tool-button ${!cropMode ? 'active' : ''}`} aria-label="Select" aria-pressed={!cropMode} onClick={() => { setCropMode(false); setCropRect(null) }}>◉</button>
-              <button title="Crop" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={() => setCropMode((current) => !current)}>◧</button>
+              <button title="Open Images" className="tool-button" aria-label="Open Images" onClick={handleOpenNativeDialog}>📂</button>
+              <button title="Crop (Esc to leave)" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={() => setCropMode((current) => !current)}>◧</button>
+              <div className="tool-separator"></div>
+              <button title="Undo (Ctrl+Z)" className="tool-button" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
+              <button title="Redo (Ctrl+Shift+Z)" className="tool-button" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>
+              <button title="Reset Adjustments" className="tool-button" aria-label="Reset Adjustments" onClick={handleResetAdjustments}>↺</button>
+              <div className="tool-separator"></div>
+              <button title="Polaroid Builder" className="tool-button" aria-label="Polaroid Builder" onClick={handlePolaroidBuilder}>📷</button>
+              <button title="Imposition Builder" className="tool-button" aria-label="Imposition Builder" onClick={handleImpositionBuilder}>🖨️</button>
+              <button title="Delete Selected Image" className="tool-button" aria-label="Delete Selected Image" onClick={handleDeleteSelectedImage}>🗑️</button>
+              <button title="Remove All Images" className="tool-button" aria-label="Remove All Images" onClick={handleRemoveAllImages}>🧹</button>
             </div>
           </aside>
 
@@ -1778,7 +1221,7 @@ function App() {
               {cropMode ? (
                 <div className="crop-toolbar">
                   <div className="crop-aspect-list" aria-label="Crop aspect ratio">
-                    {(['Free', 'Square', 'Mini', 'Wide'] as const).map((aspect) => (
+                    {CROP_ASPECTS.map((aspect) => (
                       <button
                         key={aspect}
                         type="button"
@@ -1793,7 +1236,7 @@ function App() {
                   <div className="crop-rotate-row">
                     <button type="button" title="Rotate left" className="ghost-button" onClick={() => handleCropRotate(-90)}>↺</button>
                     <button type="button" title="Rotate right" className="ghost-button" onClick={() => handleCropRotate(90)}>↻</button>
-                    <span>{cropRotation}°</span>
+                    <span title="Rotation is shown after you press Apply">{cropRotation}°</span>
                   </div>
                   {cropRect ? <button type="button" title="Apply crop" className="ghost-button" onClick={handleCropApply}>Apply</button> : null}
                   {cropRect || cropApplied ? <button type="button" title="Clear crop" className="ghost-button" onClick={handleCropClear}>Clear</button> : null}
@@ -1802,9 +1245,9 @@ function App() {
               <div className="stage-actions">
                 <button title="Previous photo" aria-label="Previous photo" onClick={() => selectPhoto(Math.max(0, selectedPhotoIndex - 1))} disabled={selectedPhotoIndex === 0}>‹</button>
                 <button title="Next photo" aria-label="Next photo" onClick={() => selectPhoto(Math.min(photos.length - 1, selectedPhotoIndex + 1))} disabled={selectedPhotoIndex >= photos.length - 1}>›</button>
-                <button title="Zoom out" aria-label="Zoom out" onClick={() => adjustZoom(0.9)} disabled={zoom <= 0.25}>−</button>
+                <button title="Zoom out" aria-label="Zoom out" onClick={() => applyZoom(0.9)} disabled={zoom <= MIN_ZOOM}>−</button>
                 <span className="zoom-level">{Math.round(zoom * 100)}%</span>
-                <button title="Zoom in" aria-label="Zoom in" onClick={() => adjustZoom(1.1)} disabled={zoom >= 3}>+</button>
+                <button title="Zoom in" aria-label="Zoom in" onClick={() => applyZoom(1.1)} disabled={zoom >= MAX_ZOOM}>+</button>
                 <button title="Fit preview" onClick={fitPreview}>Fit</button>
                 <button title="Add photos" onClick={handleAddPhotos}>⤢</button>
               </div>
@@ -1818,13 +1261,10 @@ function App() {
               onPointerMove={handlePanPointerMove}
               onPointerUp={handlePanPointerUp}
               onPointerCancel={handlePanPointerUp}
-              onDragOver={(event) => {
-                event.preventDefault()
-              }}
+              onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
                 event.preventDefault()
-                const files = Array.from(event.dataTransfer?.files ?? [])
-                appendFiles(files)
+                appendFiles(Array.from(event.dataTransfer?.files ?? []))
               }}
             >
               <canvas
@@ -1842,6 +1282,17 @@ function App() {
                   handleCropPointerUp()
                 }}
               />
+            </div>
+
+            <div className="preview-controls">
+              <button title="Rotate Left" className="preview-btn" aria-label="Rotate Left" onClick={() => handleCropRotate(-90)}>↺</button>
+              <button title="Rotate Right" className="preview-btn" aria-label="Rotate Right" onClick={() => handleCropRotate(90)}>↻</button>
+              <div className="preview-spacer"></div>
+              <button title="Fit to Window" className="preview-btn" aria-label="Fit to Window" onClick={fitPreview}>Fit to Window</button>
+              <button title="Zoom 100%" className="preview-btn" aria-label="Zoom 100%" onClick={() => applyZoom(1)}>Zoom 100%</button>
+              <button title="Zoom 50%" className="preview-btn" aria-label="Zoom 50%" onClick={() => applyZoom(0.5)}>Zoom 50%</button>
+              <div className="preview-spacer"></div>
+              <button title="Compare Original" className={`preview-btn compare-button ${showOriginalPreview ? 'active' : ''}`} aria-label="Compare Original" aria-pressed={showOriginalPreview} onPointerDown={() => setShowOriginalPreview(true)} onPointerUp={() => setShowOriginalPreview(false)} onPointerCancel={() => setShowOriginalPreview(false)} onLostPointerCapture={() => setShowOriginalPreview(false)}>Compare Original</button>
             </div>
 
             <div className="thumbnail-strip">
@@ -1876,33 +1327,17 @@ function App() {
               </div>
               <div className="histogram-actions">
                 <button type="button" className="auto-correct-button" onClick={handleAutoCorrect} disabled={!activePhoto}>
-                  Auto Color for Print
+                  Auto
                 </button>
                 <button
                   type="button"
+                  className="reset-adjustments-btn"
                   onClick={handleResetAdjustments}
                   disabled={!activePhoto}
-                  title="Reset adjustments for the selected image only"
-                  aria-label="Reset adjustments for selected image"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                    minHeight: 36,
-                    padding: '8px 12px',
-                    border: '1px solid #d97757',
-                    borderRadius: 8,
-                    background: '#fff1eb',
-                    color: '#9a3412',
-                    fontSize: 13,
-                    fontWeight: 700,
-                    cursor: activePhoto ? 'pointer' : 'not-allowed',
-                    whiteSpace: 'nowrap',
-                    flexShrink: 0,
-                  }}
+                  title="Reset Adjustments"
+                  aria-label="Reset Adjustments"
                 >
-                  ↺ Reset Adjustments
+                  ↺ Reset
                 </button>
                 <button
                   type="button"
@@ -1927,24 +1362,58 @@ function App() {
                   Before / After
                 </button>
               </div>
+
+              <div className="adjustments-clipboard-toolbar">
+                <button
+                  type="button"
+                  className="clipboard-action-btn copy-btn"
+                  onClick={handleCopyAdjustments}
+                  disabled={!activePhoto}
+                  title={activePhoto ? (cropApplied ? 'Copy settings and crop from active photo' : 'Copy settings from active photo') : 'Select a photo first'}
+                >
+                  <span className="clipboard-icon">📋</span> Copy
+                </button>
+                <button
+                  type="button"
+                  className="clipboard-action-btn paste-btn"
+                  onClick={() => handlePasteAdjustments(false)}
+                  disabled={!activePhoto || !adjustmentClipboard}
+                  title={adjustmentClipboard ? 'Paste settings only (preserve current crop)' : 'Copy adjustments first'}
+                >
+                  <span className="clipboard-icon">📥</span> Paste (No Crop)
+                </button>
+                <button
+                  type="button"
+                  className="clipboard-action-btn paste-btn paste-crop-btn"
+                  onClick={() => handlePasteAdjustments(true)}
+                  disabled={!activePhoto || !adjustmentClipboard || !adjustmentClipboard.cropApplied}
+                  title={
+                    !adjustmentClipboard
+                      ? 'Copy adjustments first'
+                      : adjustmentClipboard.cropApplied
+                        ? 'Paste settings including copied crop'
+                        : 'Copied adjustments have no crop'
+                  }
+                >
+                  <span className="clipboard-icon">✂️</span> Paste (With Crop)
+                </button>
+              </div>
             </div>
 
             <div className="slider-stack">
-              <SliderControl label="Exposure" value={activeSettings.exposure} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('exposure', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Brightness" value={activeSettings.brightness} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('brightness', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Contrast" value={activeSettings.contrast} min={0.5} max={2} step={0.01} onChange={(value) => updateSetting('contrast', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels Black" value={activeSettings.levelsBlack} min={0} max={1} step={0.01} onChange={(value) => updateSetting('levelsBlack', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels Mid" value={activeSettings.levelsMid} min={0.2} max={3} step={0.01} onChange={(value) => updateSetting('levelsMid', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Levels White" value={activeSettings.levelsWhite} min={0} max={2} step={0.01} onChange={(value) => updateSetting('levelsWhite', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Highlights" value={activeSettings.highlights} min={0} max={2} step={0.01} onChange={(value) => updateSetting('highlights', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Shadows" value={activeSettings.shadows} min={0} max={2} step={0.01} onChange={(value) => updateSetting('shadows', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Temperature" value={activeSettings.temperature} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('temperature', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Vibrance" value={activeSettings.vibrance} min={0} max={2} step={0.01} onChange={(value) => updateSetting('vibrance', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Saturation" value={activeSettings.saturation} min={0} max={2} step={0.01} onChange={(value) => updateSetting('saturation', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Hue" value={activeSettings.hue} min={-1} max={1} step={0.01} onChange={(value) => updateSetting('hue', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Sharpness" value={activeSettings.sharpen} min={0} max={2.5} step={0.01} onChange={(value) => updateSetting('sharpen', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Noise Reduction" value={activeSettings.noiseReduction} min={0} max={1} step={0.01} onChange={(value) => updateSetting('noiseReduction', value)} onInteractionStart={recordHistory} />
-              <SliderControl label="Vignette" value={activeSettings.vignette} min={0} max={1} step={0.01} onChange={(value) => updateSetting('vignette', value)} onInteractionStart={recordHistory} />
+              {SLIDERS.map(({ key, label, min, max }) => (
+                <SliderControl
+                  key={key}
+                  label={label}
+                  min={min}
+                  max={max}
+                  step={0.01}
+                  value={activeSettings[key]}
+                  defaultValue={NEUTRAL_SETTINGS[key]}
+                  onChange={(value) => updateSetting(key, value)}
+                  onInteractionStart={recordHistory}
+                />
+              ))}
             </div>
           </aside>
         </div>
@@ -1952,93 +1421,44 @@ function App() {
         <footer className="status-bar" role="status" aria-live="polite">
           <span>Status</span>
           <strong>{status}</strong>
+          <span className="status-divider">|</span>
+          <span>{photos.length} photo{photos.length === 1 ? '' : 's'}</span>
+          {activePhoto ? (
+            <>
+              <span className="status-divider">|</span>
+              <span>{activePhoto.name}</span>
+              {activePhoto.width && activePhoto.height ? <span className="status-divider">|</span> : null}
+              {activePhoto.width && activePhoto.height ? <span>{activePhoto.width} × {activePhoto.height}</span> : null}
+            </>
+          ) : null}
           {lastOutputDir ? <small title={lastOutputDir}>{lastOutputDir}</small> : null}
         </footer>
       </div>
 
       {showExportDialog ? (
-        <div className="export-dialog-backdrop" onClick={() => setShowExportDialog(false)}>
-          <div className="export-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="export-dialog-header">
-              <div>
-                <h3>Export preview</h3>
-                <p>Print layout, pages, orientation, and sizing</p>
-              </div>
-              <button type="button" title="Close export dialog" className="close-dialog" onClick={() => setShowExportDialog(false)}>×</button>
-            </div>
-
-            <div className="export-dialog-body">
-              <div className="export-controls">
-                <div className="template-row compact">
-                  <label>Layout</label>
-                  <select title="Choose print layout" value={preset} onChange={(event) => setPreset(event.target.value as PresetKey)}>
-                    {Object.values(PRESETS).map((item) => (
-                      <option key={item.key} value={item.key}>{item.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="template-row compact">
-                  <label>Paper size</label>
-                  <select title="Choose paper size" value={paperSize} onChange={(event) => setPaperSize(event.target.value as PaperSizeKey)}>
-                    {Object.entries(PAPER_SIZES).map(([key, item]) => (
-                      <option key={key} value={key}>{item.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="template-row compact">
-                  <label>Orientation</label>
-                  <select title="Choose export orientation" value={exportOrientation} onChange={(event) => setExportOrientation(event.target.value as 'portrait' | 'landscape')}>
-                    <option value="portrait">Portrait</option>
-                    <option value="landscape">Landscape</option>
-                  </select>
-                </div>
-
-                <div className="template-row compact">
-                  <label>Pages</label>
-                  <input title="Number of pages" type="number" min={1} max={10} value={exportPageCount} onChange={(event) => setExportPageCount(Math.min(10, Math.max(1, Number(event.target.value) || 1)))} />
-                </div>
-
-                <div className="toggle-row">
-                  <label>Auto rotation</label>
-                  <input title="Auto rotate images" type="checkbox" checked={exportAutoRotate} onChange={(event) => setExportAutoRotate(event.target.checked)} />
-                </div>
-
-                <div className="toggle-row">
-                  <label>Fill background with blur</label>
-                  <input title="Fill background with blurred image" type="checkbox" checked={fillBlur} onChange={(event) => setFillBlur(event.target.checked)} />
-                </div>
-
-                <div className="template-row compact">
-                  <label>Export format</label>
-                  <select title="Choose export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as 'png' | 'jpeg' | 'pdf')}>
-                    <option value="png">PNG</option>
-                    <option value="jpeg">JPEG</option>
-                    <option value="pdf">PDF</option>
-                  </select>
-                </div>
-
-                {exportTotalPages > 1 && (
-                  <div className="export-pagination">
-                    <button type="button" onClick={() => setExportPreviewPage(p => Math.max(0, p - 1))} disabled={exportPreviewPage === 0}>Previous</button>
-                    <span>Page {exportPreviewPage + 1} of {exportTotalPages}</span>
-                    <button type="button" onClick={() => setExportPreviewPage(p => Math.min(exportTotalPages - 1, p + 1))} disabled={exportPreviewPage === exportTotalPages - 1}>Next</button>
-                  </div>
-                )}
-              </div>
-
-              <div className="export-preview-panel">
-                <canvas ref={exportPreviewCanvasRef} className="export-preview-canvas" />
-              </div>
-            </div>
-
-            <div className="export-dialog-actions">
-              <button type="button" title="Cancel export" className="ghost-button" onClick={() => setShowExportDialog(false)}>Cancel</button>
-              <button type="button" title="Save export" className="action-button" onClick={finalizeExport}>Save export</button>
-            </div>
-          </div>
-        </div>
+        <ExportDialog
+          photos={photos}
+          preset={preset}
+          onPresetChange={setPreset}
+          paperSize={paperSize}
+          onPaperSizeChange={setPaperSize}
+          orientation={exportOrientation}
+          onOrientationChange={setExportOrientation}
+          pageCount={exportPageCount}
+          onPageCountChange={setExportPageCount}
+          autoRotate={exportAutoRotate}
+          onAutoRotateChange={setExportAutoRotate}
+          fillBlur={fillBlur}
+          onFillBlurChange={setFillBlur}
+          format={exportFormat}
+          onFormatChange={setExportFormat}
+          previewPage={exportPreviewPage}
+          onPreviewPageChange={setExportPreviewPage}
+          buildCard={buildCard}
+          onClose={() => setShowExportDialog(false)}
+          onSave={finalizeExport}
+          onPreviewError={setStatus}
+        />
       ) : null}
 
       {processing ? (
