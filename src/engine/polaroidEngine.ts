@@ -149,10 +149,16 @@ export function fitImageToFrame(
   }
 }
 
+export interface GridOffset {
+  offsetX: number
+  offsetY: number
+}
+
 export function buildSheetLayout(
   preset: PresetDefinition,
   imageCount: number,
   paperSize: PaperSizeKey = 'A4',
+  offset: GridOffset = { offsetX: 0, offsetY: 0 },
 ): {
   cols: number
   rows: number
@@ -218,8 +224,8 @@ export function buildSheetLayout(
     rows,
     sheetW: resolvedSheetW,
     sheetH: resolvedSheetH,
-    marginX: (resolvedSheetW - gridW) / 2,
-    marginY: (resolvedSheetH - gridH) / 2,
+    marginX: (resolvedSheetW - gridW) / 2 + offset.offsetX,
+    marginY: (resolvedSheetH - gridH) / 2 + offset.offsetY,
     markLength,
   }
 }
@@ -311,8 +317,8 @@ function applyProcessingToPixels(source: Uint8ClampedArray, width: number, heigh
   const highlightAmount = highlightStrength - 1
   const highlightIntensity = Math.abs(highlightAmount) * 0.9
 
-  const hasShadows = settings.shadows > 0
-  const shadowAmount = settings.shadows * 0.8
+  const shadowAmount = Math.max(-1, Math.min(1, settings.shadows))
+  const hasShadows = shadowAmount !== 0
 
   const vibranceFactor = 1 + (settings.vibrance - 1) * 0.9
   const saturationFactor = settings.saturation * vibranceFactor
@@ -362,10 +368,14 @@ function applyProcessingToPixels(source: Uint8ClampedArray, width: number, heigh
       }
 
       if (hasContrast) {
-        const mean = (r + g + b) * 0.3333333333333333
-        r = clamp01((r - mean) * contrast + mean)
-        g = clamp01((g - mean) * contrast + mean)
-        b = clamp01((b - mean) * contrast + mean)
+        // Adjust contrast using luminance, applying the same offset to each
+        // channel so contrast does not directly scale RGB color differences.
+        const luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        const adjustedLuminance = clamp01((luminance - 0.5) * contrast + 0.5)
+        const offset = adjustedLuminance - luminance
+        r = clamp01(r + offset)
+        g = clamp01(g + offset)
+        b = clamp01(b + offset)
       }
 
       if (toneLut) {
@@ -390,12 +400,21 @@ function applyProcessingToPixels(source: Uint8ClampedArray, width: number, heigh
       }
 
       if (hasShadows) {
-        const shadowTone = 1 - (r + g + b) * 0.3333333333333333
-        const darken = Math.max(0, shadowTone)
-        const factor = 1 - shadowAmount * darken
-        r = clamp01(r * factor)
-        g = clamp01(g * factor)
-        b = clamp01(b * factor)
+        // Positive values lift dark areas; negative values deepen them.
+        // The squared shadow mask keeps midtones and highlights mostly unchanged.
+        const luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        const shadowMask = (1 - luminance) * (1 - luminance)
+        if (shadowAmount > 0) {
+          const lift = shadowAmount * 0.5 * shadowMask
+          r = clamp01(r + lift)
+          g = clamp01(g + lift)
+          b = clamp01(b + lift)
+        } else {
+          const factor = 1 + shadowAmount * 0.8 * shadowMask
+          r = clamp01(r * factor)
+          g = clamp01(g * factor)
+          b = clamp01(b * factor)
+        }
       }
 
       if (hasSat) {
@@ -613,9 +632,10 @@ export async function renderSheet(
   settings: AdjustmentSettings,
   paperSize: PaperSizeKey = 'A4',
   autoRotate = false,
+  offset: GridOffset = { offsetX: 0, offsetY: 0 },
 ): Promise<HTMLCanvasElement> {
   const preset = PRESETS[presetKey]
-  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize)
+  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize, offset)
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = Math.round(layout.sheetW)
   sheetCanvas.height = Math.round(layout.sheetH)

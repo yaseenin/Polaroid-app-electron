@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+
 import './App.css'
+
 import {
   PRESETS,
   buildAdjustmentOperations,
@@ -11,8 +13,11 @@ import {
   type PaperSizeKey,
   type PresetKey,
 } from './engine/polaroidEngine'
+
 import { ExportDialog } from './components/ExportDialog'
+
 import { SliderControl } from './components/SliderControl'
+
 import {
   HISTOGRAM_BUCKETS,
   clamp,
@@ -26,6 +31,7 @@ import {
   normalizeImageUrl,
   resizeCropRect,
 } from './lib/canvasUtils'
+
 import type {
   BuildCard,
   CropApplied,
@@ -45,10 +51,9 @@ import type {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-/** Settings every newly imported photo starts with. */
-const IMPORT_DEFAULTS: AdjustmentSettings = { ...defaultSettings, brightness: 1.3, contrast: 1.1, saturation: 1.15 }
-
-/** Explicit neutral values: "Reset" removes the import-time auto-correction entirely. */
+/** Explicit neutral values: no adjustment at all. New photos start here, and "Reset" returns here.
+ *  Use this (not `defaultSettings`) anywhere a "no adjustment" fallback is needed: `defaultSettings`
+ *  carries brightness 1.3 / contrast 1.1 / saturation 1.15 and would silently brighten the photo. */
 const NEUTRAL_SETTINGS: AdjustmentSettings = {
   ...defaultSettings,
   exposure: 1,
@@ -67,6 +72,122 @@ const NEUTRAL_SETTINGS: AdjustmentSettings = {
   noiseReduction: 0,
   vignette: 0,
   fillBlur: false,
+}
+
+/** Prints come out darker and flatter than a screen, so aim a little brighter than "correct". */
+const PRINT_TARGET_MEDIAN = 0.52
+const PRINT_SHARPEN = 0.3
+
+/**
+ * Analyzes a photo and returns adjustment settings tuned for printing.
+ * Follows the engine's processing order: gain (exposure * brightness) -> contrast -> levels
+ * -> highlights -> shadows -> saturation -> temperature.
+ */
+function analyzeForPrint(image: HTMLImageElement, base: AdjustmentSettings): AdjustmentSettings {
+  const scale = Math.min(1, 256 / image.naturalWidth, 256 / image.naturalHeight)
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('Unable to analyze the selected image.')
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+
+  const bins = new Array(256).fill(0)
+  let count = 0
+  let satSum = 0
+  let neutralCount = 0
+  let nr = 0
+  let nb = 0
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 3] < 8) continue
+    const r = pixels[i] / 255
+    const g = pixels[i + 1] / 255
+    const b = pixels[i + 2] / 255
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    bins[Math.min(255, Math.round(lum * 255))]++
+    count++
+    satSum += max > 0.05 ? (max - min) / max : 0
+    // White balance only from truly near-gray midtones, so skin or colored scenes aren't "corrected".
+    if (lum > 0.12 && lum < 0.88 && max - min < 0.12) {
+      nr += r
+      nb += b
+      neutralCount++
+    }
+  }
+  if (count === 0) throw new Error('The selected image contains no visible pixels.')
+
+  const pct = (p: number) => {
+    let sum = 0
+    for (let i = 0; i < 256; i++) {
+      sum += bins[i]
+      if (sum >= p * count) return i / 255
+    }
+    return 1
+  }
+  const p1 = pct(0.01)
+  const p5 = pct(0.05)
+  const p10 = pct(0.1)
+  const median = pct(0.5)
+  const p95 = pct(0.95)
+  const p99 = pct(0.99)
+
+  // 1. Exposure (engine gain = exposure * brightness, so brightness stays 1).
+  //    Brighten toward the print target, but never push the top 1% far past white.
+  const wanted = PRINT_TARGET_MEDIAN / Math.max(0.08, median)
+  const clipLimit = 1.1 / Math.max(0.25, p99)
+  const exposure = clamp(Math.min(wanted, clipLimit), 0.85, 1.8)
+
+  // 2. Contrast (engine: luminance around 0.5, applied after gain).
+  const spread = (p95 - p5) * exposure
+  const contrast = spread < 0.45 ? 1.18 : spread < 0.6 ? 1.1 : spread > 0.9 ? 0.97 : 1.03
+  const tone = (v: number) => clamp((v * exposure - 0.5) * contrast + 0.5, 0, 1)
+
+  // 3. Black point (engine applies levels after gain + contrast).
+  const levelsBlack = clamp(tone(p1) * 0.8, 0, 0.06)
+  const afterLevels = (v: number) => clamp((tone(v) - levelsBlack) / (1 - levelsBlack), 0, 1)
+
+  // 4. Shadows / highlights, judged on the values the engine will actually see.
+  const p10After = afterLevels(p10)
+  const p95After = afterLevels(p95)
+  const p99After = afterLevels(p99)
+  const shadows = clamp((0.2 - p10After) * 1.8, 0, 0.45)
+  const highlights = p99After > 0.98 ? 0.85 : p95After > 0.9 ? 0.93 : 1
+
+  // 5. Saturation only; the engine's "vibrance" is just another saturation multiplier.
+  const meanSat = satSum / count
+  const saturation = meanSat < 0.2 ? 1.15 : meanSat < 0.35 ? 1.08 : 1.03
+
+  // 6. White balance: engine does r *= 1 + 0.3t, b *= 1 - 0.3t. Apply 60% of the full correction.
+  let temperature = 0
+  if (neutralCount > count * 0.03) {
+    const r = nr / neutralCount
+    const b = nb / neutralCount
+    const full = (b - r) / (0.3 * Math.max(0.05, r + b))
+    if (Math.abs(full) > 0.03) temperature = clamp(full * 0.6, -0.2, 0.2)
+  }
+
+  return {
+    ...base,
+    exposure,
+    brightness: 1,
+    contrast,
+    levelsBlack,
+    levelsMid: 1,
+    levelsWhite: 1,
+    highlights,
+    shadows,
+    temperature,
+    vibrance: 1,
+    saturation,
+    hue: 0,
+    sharpen: PRINT_SHARPEN,
+    noiseReduction: 0,
+    vignette: 0,
+  }
 }
 
 type SliderKey =
@@ -94,7 +215,7 @@ const SLIDERS: Array<{ key: SliderKey; label: string; min: number; max: number }
   { key: 'levelsMid', label: 'Levels Mid', min: 0.2, max: 3 },
   { key: 'levelsWhite', label: 'Levels White', min: 0, max: 2 },
   { key: 'highlights', label: 'Highlights', min: 0, max: 2 },
-  { key: 'shadows', label: 'Shadows', min: 0, max: 2 },
+  { key: 'shadows', label: 'Shadows', min: -1, max: 1 },
   { key: 'temperature', label: 'Temperature', min: -1, max: 1 },
   { key: 'vibrance', label: 'Vibrance', min: 0, max: 2 },
   { key: 'saturation', label: 'Saturation', min: 0, max: 2 },
@@ -105,9 +226,13 @@ const SLIDERS: Array<{ key: SliderKey; label: string; min: number; max: number }
 ]
 
 const CROP_ASPECTS: CropAspect[] = ['Free', 'Square', 'Mini', 'Wide']
+
 const MAX_PREVIEW_DIM = 1200
+
 const MIN_ZOOM = 0.25
+
 const MAX_ZOOM = 3
+
 const EMPTY_HISTOGRAM = new Array(HISTOGRAM_BUCKETS).fill(0)
 
 type CropDrag = {
@@ -139,14 +264,16 @@ function App() {
 
   /* ---- Export state ---- */
   const [preset, setPreset] = useState<PresetKey>('mini')
-  const [paperSize, setPaperSize] = useState<PaperSizeKey>('A4')
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('png')
+  const [paperSize, setPaperSize] = useState<PaperSizeKey>('13x19')
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('pdf')
   // NOTE: page count and orientation are stored in projects and shown in the preview,
   // but the sheet engine (buildSheetLayout / renderSheet) does not take them yet.
   const [exportPageCount, setExportPageCount] = useState(1)
   const [exportOrientation, setExportOrientation] = useState<ExportOrientation>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
   const [fillBlur, setFillBlur] = useState(false)
+  const [exportGridOffsetX, setExportGridOffsetX] = useState(0)
+  const [exportGridOffsetY, setExportGridOffsetY] = useState(0)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [exportPreviewPage, setExportPreviewPage] = useState(0)
 
@@ -187,10 +314,11 @@ function App() {
 
   /* ---- Derived values (single source of truth: the per-photo maps) ---- */
   const activePhoto: Photo | undefined = photos[selectedPhotoIndex] ?? photos[0]
-  const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? defaultSettings : defaultSettings
+  const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? NEUTRAL_SETTINGS : NEUTRAL_SETTINGS
   const cropApplied = activePhoto ? cropAppliedByPhoto[activePhoto.id] ?? null : null
   const cropRect = activePhoto ? cropRectByPhoto[activePhoto.id] ?? null : null
   const activeCropApplied = cropApplied
+
   cropRectRef.current = cropRect
   zoomRef.current = zoom
   panRef.current = panOffset
@@ -214,7 +342,7 @@ function App() {
   /* ---- History ---- */
   const captureSnapshot = (photoId: number | null = activePhoto?.id ?? null): EditorSnapshot => ({
     photoId,
-    settings: photoId !== null ? settingsByPhoto[photoId] ?? defaultSettings : defaultSettings,
+    settings: photoId !== null ? settingsByPhoto[photoId] ?? NEUTRAL_SETTINGS : NEUTRAL_SETTINGS,
     cropAppliedByPhoto,
     cropRotation,
   })
@@ -330,11 +458,23 @@ function App() {
     if (incoming.length === 0) return
     setPhotos((current) => [...current, ...incoming])
     setSelectedPhotoIndex(photos.length + incoming.length - 1)
-    const importSettings = applyAutoCorrectionOnImport ? IMPORT_DEFAULTS : NEUTRAL_SETTINGS
     setSettingsByPhoto((current) => ({
       ...current,
-      ...Object.fromEntries(incoming.map((photo) => [photo.id, importSettings])),
+      ...Object.fromEntries(incoming.map((photo) => [photo.id, NEUTRAL_SETTINGS])),
     }))
+
+    if (applyAutoCorrectionOnImport) {
+      incoming.forEach(async (photo) => {
+        try {
+          const image = await loadImageResource(photo.url)
+          const corrected = analyzeForPrint(image, NEUTRAL_SETTINGS)
+          setSettingsByPhoto((current) => ({ ...current, [photo.id]: corrected }))
+        } catch {
+          // leave the photo neutral if analysis fails
+        }
+      })
+    }
+
     generateThumbnails(incoming)
     setStatus(`${incoming.length} photo(s) loaded${sourceLabel}`)
   }
@@ -404,7 +544,7 @@ function App() {
   }
 
   const handlePolaroidBuilder = () => {
-    setStatus('Polaroid Builder coming soon')
+    openExportDialog()
   }
 
   const handleImpositionBuilder = () => {
@@ -444,7 +584,7 @@ function App() {
         name: photo.name,
         path: photo.path,
         cropApplied: cropAppliedByPhoto[photo.id] ?? null,
-        settings: settingsByPhoto[photo.id] ?? defaultSettings,
+        settings: settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS,
       })),
       settings: activeSettings,
       preset,
@@ -454,6 +594,8 @@ function App() {
       exportPageCount,
       exportOrientation,
       exportAutoRotate,
+      exportGridOffsetX,
+      exportGridOffsetY,
     }
 
     try {
@@ -497,7 +639,7 @@ function App() {
       setPhotos(restoredPhotos)
       setSettingsByPhoto(
         Object.fromEntries(
-          restored.map(({ saved, photo }) => [photo.id, saved.settings ?? project.settings ?? defaultSettings]),
+          restored.map(({ saved, photo }) => [photo.id, saved.settings ?? project.settings ?? NEUTRAL_SETTINGS]),
         ),
       )
       setCropAppliedByPhoto(Object.fromEntries(restored.map(({ saved, photo }) => [photo.id, saved.cropApplied ?? null])))
@@ -509,6 +651,8 @@ function App() {
       setExportPageCount(project.exportPageCount ?? 1)
       setExportOrientation(project.exportOrientation ?? 'portrait')
       setExportAutoRotate(project.exportAutoRotate ?? true)
+      setExportGridOffsetX(project.exportGridOffsetX ?? 0)
+      setExportGridOffsetY(project.exportGridOffsetY ?? 0)
       setCropMode(false)
       setCropRotation(0)
       setUndoStack([])
@@ -555,60 +699,34 @@ function App() {
 
   const handleAutoCorrect = async () => {
     if (!activePhoto) return
-
     const photo = activePhoto
-    setStatus(`Analyzing ${photo.name} for print correction…`)
+    setStatus(`Analyzing ${photo.name} for print…`)
+
     try {
       const image = await loadImageResource(photo.url)
-      const sample = document.createElement('canvas')
-      sample.width = Math.min(128, image.naturalWidth)
-      sample.height = Math.max(1, Math.round(image.naturalHeight * (sample.width / image.naturalWidth)))
-      const context = sample.getContext('2d')
-      if (!context) throw new Error('Unable to analyze the selected image.')
-      context.drawImage(image, 0, 0, sample.width, sample.height)
-
-      const pixels = context.getImageData(0, 0, sample.width, sample.height).data
-      const pixelCount = Math.max(1, pixels.length / 4)
-      let redTotal = 0
-      let greenTotal = 0
-      let blueTotal = 0
-      for (let index = 0; index < pixels.length; index += 4) {
-        redTotal += pixels[index] / 255
-        greenTotal += pixels[index + 1] / 255
-        blueTotal += pixels[index + 2] / 255
-      }
-
-      const averageRed = redTotal / pixelCount
-      const averageGreen = greenTotal / pixelCount
-      const averageBlue = blueTotal / pixelCount
-      const temperature = clamp((averageBlue - averageRed) * 0.5, -0.25, 0.25)
-      const whiteBalancedLuminance =
-        averageRed * (1 + temperature) * 0.299 +
-        averageGreen * 0.587 +
-        averageBlue * (1 - temperature) * 0.114
-
-      const corrected: AdjustmentSettings = {
-        ...(settingsByPhoto[photo.id] ?? defaultSettings),
-        exposure: clamp(0.5 / Math.max(0.05, whiteBalancedLuminance), 1, 1.25),
-        brightness: 1.3,
-        contrast: 1.1,
-        levelsBlack: 0,
-        levelsMid: 1,
-        levelsWhite: 1,
-        highlights: 1,
-        shadows: 1,
-        saturation: 1.15,
-        vibrance: 1,
-        hue: 0,
-        sharpen: 0,
-        noiseReduction: 0,
-        temperature,
-        vignette: 0,
-      }
-
+      const corrected = analyzeForPrint(image, settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS)
       recordHistory()
       setSettingsByPhoto((current) => ({ ...current, [photo.id]: corrected }))
-      setStatus(`Auto color correction applied to ${photo.name}`)
+      setStatus(`Print auto-correction applied to ${photo.name}`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Auto correction failed.')
+    }
+  }
+
+  const handleAutoCorrectAll = async () => {
+    if (photos.length === 0) return
+    setStatus('Analyzing all photos for print…')
+
+    try {
+      const entries = await Promise.all(
+        photos.map(async (photo) => {
+          const image = await loadImageResource(photo.url)
+          return [photo.id, analyzeForPrint(image, settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS)] as const
+        }),
+      )
+      recordHistory()
+      setSettingsByPhoto((current) => ({ ...current, ...Object.fromEntries(entries) }))
+      setStatus(`Print auto-correction applied to ${entries.length} photo(s)`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Auto correction failed.')
     }
@@ -980,7 +1098,7 @@ function App() {
     async (photo, targetWidth, targetHeight, { preview, blurRadius }) => {
       const image = await loadImageResource(photo.url)
       const source = preview ? getOrCreateProxy(photo, image) : image
-      const processed = await renderProcessedImage(source, settingsByPhoto[photo.id] ?? defaultSettings)
+      const processed = await renderProcessedImage(source, settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS)
       const crop = cropAppliedByPhoto[photo.id] ?? null
       const cropped = crop ? createCroppedCanvas(processed, crop) : processed
 
@@ -1015,7 +1133,12 @@ function App() {
 
       const dataUrls: string[] = []
       for (let i = 0; i < images.length; i += maxImagesPerPage) {
-        const sheet = await renderSheet(images.slice(i, i + maxImagesPerPage), preset, defaultSettings, paperSize, exportAutoRotate)
+        // The cards are already processed by buildCard, so the sheet must use NEUTRAL settings.
+        // (Passing `defaultSettings` here would apply brightness 1.3 / contrast 1.1 / saturation 1.15 a second time.)
+        const sheet = await renderSheet(images.slice(i, i + maxImagesPerPage), preset, NEUTRAL_SETTINGS, paperSize, exportAutoRotate, {
+          offsetX: exportGridOffsetX,
+          offsetY: exportGridOffsetY,
+        })
         dataUrls.push(sheet.toDataURL(mimeType))
       }
 
@@ -1088,7 +1211,7 @@ function App() {
       // exposure / contrast / sharpen are sent together and each group uses its own values.
       const groups = new Map<string, { settings: AdjustmentSettings; files: string[] }>()
       for (const photo of photos) {
-        const photoSettings = settingsByPhoto[photo.id] ?? defaultSettings
+        const photoSettings = settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS
         const key = `${photoSettings.exposure}|${photoSettings.contrast}|${photoSettings.sharpen}`
         const group = groups.get(key) ?? { settings: photoSettings, files: [] }
         group.files.push(photo.path)
@@ -1326,8 +1449,23 @@ function App() {
                 ))}
               </div>
               <div className="histogram-actions">
-                <button type="button" className="auto-correct-button" onClick={handleAutoCorrect} disabled={!activePhoto}>
+                <button
+                  type="button"
+                  className="auto-correct-button"
+                  onClick={handleAutoCorrect}
+                  disabled={!activePhoto}
+                  title="Analyze this photo and correct it for printing"
+                >
                   Auto
+                </button>
+                <button
+                  type="button"
+                  className="auto-correct-button"
+                  onClick={handleAutoCorrectAll}
+                  disabled={photos.length === 0}
+                  title="Analyze every photo and correct each one for printing"
+                >
+                  Auto All
                 </button>
                 <button
                   type="button"
@@ -1450,6 +1588,12 @@ function App() {
           onAutoRotateChange={setExportAutoRotate}
           fillBlur={fillBlur}
           onFillBlurChange={setFillBlur}
+          gridOffsetX={exportGridOffsetX}
+          gridOffsetY={exportGridOffsetY}
+          onGridOffsetChange={(x, y) => {
+            setExportGridOffsetX(x)
+            setExportGridOffsetY(y)
+          }}
           format={exportFormat}
           onFormatChange={setExportFormat}
           previewPage={exportPreviewPage}

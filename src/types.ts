@@ -52,6 +52,9 @@ export type SavedProject = {
   exportPageCount: number
   exportOrientation: ExportOrientation
   exportAutoRotate: boolean
+  /** Manual grid offset applied on top of the centered layout (in sheet pixels). */
+  exportGridOffsetX: number
+  exportGridOffsetY: number
 }
 
 export type BuildCardOptions = {
