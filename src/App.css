@@ -160,6 +160,63 @@ button {
   opacity: 0.45;
 }
 
+.file-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.file-menu-button {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: var(--ui-font-size);
+  font-weight: 600;
+  padding: 0;
+  opacity: 0.9;
+  cursor: pointer;
+}
+
+.file-menu-button:hover {
+  opacity: 1;
+}
+
+.file-menu-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 180px;
+  background: var(--panel-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.file-menu-dropdown button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: var(--ui-font-size);
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.file-menu-dropdown button:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.file-menu-dropdown button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .import-toggle {
   border: 1px solid var(--border);
   border-radius: 6px;

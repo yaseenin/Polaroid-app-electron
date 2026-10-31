@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, type MenuItemConstructorOptions } from 'electron'
 import { PDFDocument } from 'pdf-lib'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -152,13 +152,16 @@ ipcMain.handle('open-project', async () => {
 
   try {
     const project = JSON.parse(await fs.promises.readFile(filePaths[0], 'utf8')) as {
-      photos?: Array<{ name?: string; path?: string; cropApplied?: unknown }>
+      photos?: Array<{ name?: string; path?: string; cropApplied?: unknown; dataUrl?: string }>
     }
     if (!Array.isArray(project.photos)) {
       throw new Error('This file does not contain a valid Polaroid project.')
     }
 
     const photos = project.photos.map((photo) => {
+      if (photo.dataUrl) {
+        return { ...photo, path: photo.path ?? '', dataUrl: photo.dataUrl }
+      }
       if (!photo.path || !fs.existsSync(photo.path)) {
         throw new Error(`Project photo is missing: ${photo.path ?? photo.name ?? 'unknown image'}`)
       }
@@ -341,7 +344,53 @@ ipcMain.handle('rust:process', async (_event, request: RustProcessRequest): Prom
     }
   }
 })
+function sendMenuAction(action: string, payload?: unknown) {
+  win?.webContents.send('menu-action', action, payload)
+}
 
+function buildAppMenu() {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Add Photos', click: () => sendMenuAction('add-photos') },
+        {
+          label: 'Auto-correct import',
+          type: 'checkbox',
+          checked: false,
+          click: (item) => sendMenuAction('toggle-auto-import', item.checked),
+        },
+        { type: 'separator' },
+        // registerAccelerator:false = shown in the menu, but App.tsx's own Ctrl+S / Ctrl+O handler does the work (no double trigger)
+        { label: 'Open Project', accelerator: 'CmdOrCtrl+O', registerAccelerator: false, click: () => sendMenuAction('open-project') },
+        { label: 'Save Project', accelerator: 'CmdOrCtrl+S', registerAccelerator: false, click: () => sendMenuAction('save-project') },
+        { label: 'Recover Autosave', click: () => sendMenuAction('recover') },
+        { type: 'separator' },
+        { label: 'Export…', click: () => sendMenuAction('export') },
+        { label: 'Process (Rust)', click: () => sendMenuAction('process') },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', registerAccelerator: false, click: () => sendMenuAction('undo') },
+        { label: 'Redo', accelerator: 'CmdOrCtrl+Shift+Z', registerAccelerator: false, click: () => sendMenuAction('redo') },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    { label: 'Help', submenu: [{ role: 'toggleDevTools' }] },
+  ]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 function createWindow() {
   win = new BrowserWindow({
     icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
@@ -375,4 +424,7 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  buildAppMenu()
+  createWindow()
+})
