@@ -287,7 +287,7 @@ function getSharedConvBuffer(size: number): Float32Array {
   return sharedConvBuffer
 }
 
-function applyProcessingToPixels(source: Uint8ClampedArray, width: number, height: number, settings: AdjustmentSettings) {
+export function applyProcessingToPixels(source: Uint8ClampedArray, width: number, height: number, settings: AdjustmentSettings) {
   const operations = buildAdjustmentOperations(settings)
   if (operations.length === 0) {
     return

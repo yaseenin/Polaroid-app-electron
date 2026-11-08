@@ -1,10 +1,11 @@
-import { buildAdjustmentOperations, type AdjustmentSettings } from './polaroidEngine'
+import { applyProcessingToPixels, buildAdjustmentOperations, type AdjustmentSettings } from './polaroidEngine'
 
 /**
  * Off-thread version of `renderProcessedImage`.
  *
  * The canvas draw + getImageData stay on the main thread (they need the DOM), but the heavy per-pixel
  * loop runs in a Web Worker, so dragging sliders no longer freezes the UI.
+ * If the worker fails or is unsupported in an environment, it falls back seamlessly to main-thread processing.
  *
  * Two channels, each with its own worker:
  *  - 'preview': latest-wins. While the worker is busy, only the newest request is kept; older queued
@@ -34,6 +35,7 @@ type Job = {
 class WorkerChannel {
   private readonly latestWins: boolean
   private worker: Worker | null = null
+  private failed = false
   private current: Job | null = null
   private queue: Job[] = []
 
@@ -41,27 +43,54 @@ class WorkerChannel {
     this.latestWins = latestWins
   }
 
-  private ensureWorker(): Worker {
+  private ensureWorker(): Worker | null {
+    if (this.failed) return null
     if (this.worker) return this.worker
 
-    const worker = new Worker(new URL('./processWorker.ts', import.meta.url), { type: 'module' })
-    worker.onmessage = (event: MessageEvent<{ buffer: ArrayBuffer }>) => {
-      const job = this.current
-      this.current = null
-      job?.resolve(event.data.buffer)
-      this.pump()
+    try {
+      const worker = new Worker(new URL('./processWorker.ts', import.meta.url), { type: 'module' })
+      worker.onmessage = (event: MessageEvent<{ buffer: ArrayBuffer }>) => {
+        const job = this.current
+        this.current = null
+        job?.resolve(event.data.buffer)
+        this.pump()
+      }
+      worker.onerror = () => {
+        // Fall back gracefully to in-thread processing if worker crashes or fails
+        const job = this.current
+        this.current = null
+        if (job) {
+          try {
+            const pixels = new Uint8ClampedArray(job.buffer)
+            applyProcessingToPixels(pixels, job.width, job.height, job.settings)
+            job.resolve(job.buffer)
+          } catch (err) {
+            job.reject(err instanceof Error ? err : new Error('Processing failed'))
+          }
+        }
+        this.pump()
+      }
+      this.worker = worker
+      return worker
+    } catch {
+      this.failed = true
+      return null
     }
-    worker.onerror = (event) => {
-      const job = this.current
-      this.current = null
-      job?.reject(new Error(event.message || 'The image worker failed.'))
-      this.pump()
-    }
-    this.worker = worker
-    return worker
   }
 
   submit(buffer: ArrayBuffer, width: number, height: number, settings: AdjustmentSettings): Promise<ArrayBuffer> {
+    const worker = this.ensureWorker()
+    if (!worker || this.failed) {
+      // In-thread synchronous execution fallback
+      try {
+        const pixels = new Uint8ClampedArray(buffer)
+        applyProcessingToPixels(pixels, width, height, settings)
+        return Promise.resolve(buffer)
+      } catch (err) {
+        return Promise.reject(err instanceof Error ? err : new Error('Processing failed'))
+      }
+    }
+
     return new Promise<ArrayBuffer>((resolve, reject) => {
       if (this.latestWins) {
         for (const stale of this.queue) stale.reject(new SupersededError())
@@ -76,10 +105,37 @@ class WorkerChannel {
     if (this.current || this.queue.length === 0) return
     const job = this.queue.shift() as Job
     this.current = job
-    this.ensureWorker().postMessage(
-      { buffer: job.buffer, width: job.width, height: job.height, settings: job.settings },
-      [job.buffer],
-    )
+    const worker = this.ensureWorker()
+    if (!worker) {
+      this.current = null
+      try {
+        const pixels = new Uint8ClampedArray(job.buffer)
+        applyProcessingToPixels(pixels, job.width, job.height, job.settings)
+        job.resolve(job.buffer)
+      } catch (err) {
+        job.reject(err instanceof Error ? err : new Error('Processing failed'))
+      }
+      this.pump()
+      return
+    }
+
+    try {
+      worker.postMessage(
+        { buffer: job.buffer, width: job.width, height: job.height, settings: job.settings },
+        [job.buffer],
+      )
+    } catch {
+      // Transfer failed or worker terminated; process inline
+      this.current = null
+      try {
+        const pixels = new Uint8ClampedArray(job.buffer)
+        applyProcessingToPixels(pixels, job.width, job.height, job.settings)
+        job.resolve(job.buffer)
+      } catch (err) {
+        job.reject(err instanceof Error ? err : new Error('Processing failed'))
+      }
+      this.pump()
+    }
   }
 }
 
@@ -114,12 +170,20 @@ export async function renderProcessedImageAsync(
   }
 
   const imageData = context.getImageData(0, 0, width, height)
-  const result = await getChannel(options.channel ?? 'export').submit(
-    imageData.data.buffer as ArrayBuffer,
-    width,
-    height,
-    settings,
-  )
-  context.putImageData(new ImageData(new Uint8ClampedArray(result), width, height), 0, 0)
-  return canvas
+  try {
+    const result = await getChannel(options.channel ?? 'export').submit(
+      imageData.data.buffer as ArrayBuffer,
+      width,
+      height,
+      settings,
+    )
+    context.putImageData(new ImageData(new Uint8ClampedArray(result), width, height), 0, 0)
+    return canvas
+  } catch (err) {
+    if (isSuperseded(err)) throw err
+    // If worker fails, process in-place on context
+    applyProcessingToPixels(imageData.data, width, height, settings)
+    context.putImageData(imageData, 0, 0)
+    return canvas
+  }
 }

@@ -323,7 +323,9 @@ function App() {
   }
 
   const appendFiles = (files: File[]) => {
-    const images = files.filter((file) => file.type.startsWith('image/'))
+    const images = files.filter(
+      (file) => file.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif)$/i.test(file.name),
+    )
     if (images.length === 0) {
       if (files.length > 0) setStatus('No image files found in the selection.')
       return
@@ -339,7 +341,7 @@ function App() {
       return {
         id: nextPhotoId(),
         name: file.name,
-        url: URL.createObjectURL(file),
+        url: filePath ? toAppFileUrl(filePath) : URL.createObjectURL(file),
         path: filePath || file.name,
       }
     })
@@ -693,7 +695,7 @@ function App() {
       const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
       const maxImagesPerPage = layout.cols * layout.rows
       // PDF pages use JPEG: embedding is a straight copy (PNG must be decoded) and the file stays far smaller.
-      const mime = exportFormat === 'png' ? 'image/png' : 'image/jpeg'
+      const mime = exportFormat === 'png' ? 'image/png' : exportFormat === 'webp' ? 'image/webp' : 'image/jpeg'
 
       // Encode each sheet to bytes right away so the huge canvas can be freed before the next one is built.
       const buffers: ArrayBuffer[] = []
@@ -900,7 +902,7 @@ function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp"
+        accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
         multiple
         hidden
         onChange={handleFilesSelected}

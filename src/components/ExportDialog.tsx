@@ -385,6 +385,7 @@ export function ExportDialog({
                 <select title="Choose export format" value={format} onChange={(event) => onFormatChange(event.target.value as ExportFormat)}>
                   <option value="png">PNG</option>
                   <option value="jpeg">JPEG</option>
+                  <option value="webp">WebP</option>
                   <option value="pdf">PDF</option>
                 </select>
               </div>

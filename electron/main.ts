@@ -1,10 +1,23 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, net, type MenuItemConstructorOptions } from 'electron'
 import { PDFDocument } from 'pdf-lib'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'polaroid-file',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+])
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.APP_ROOT = path.join(__dirname, '..')
@@ -91,12 +104,44 @@ function ensureRustEngineReady(): string {
   throw new Error(`Rust engine binary was not found at ${RUST_RELEASE_BINARY_PATH}`)
 }
 
+function convertHeicToJpegCached(filePath: string): string {
+  const cacheDir = path.join(os.tmpdir(), 'polaroid_heic_cache')
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true })
+  }
+
+  const stat = fs.statSync(filePath)
+  const hashName = `${path.basename(filePath)}_${stat.size}_${Math.round(stat.mtimeMs)}.jpg`
+  const cachedPath = path.join(cacheDir, hashName)
+
+  if (fs.existsSync(cachedPath)) {
+    return cachedPath
+  }
+
+  if (process.platform === 'darwin') {
+    const res = spawnSync('/usr/bin/sips', ['-s', 'format', 'jpeg', filePath, '--out', cachedPath], {
+      encoding: 'utf8',
+    })
+    if (res.status === 0 && fs.existsSync(cachedPath)) {
+      return cachedPath
+    }
+  }
+
+  return filePath
+}
+
 async function fileToDataUrlAsync(filePath: string): Promise<string> {
-  const buffer = await fs.promises.readFile(filePath)
-  const extension = path.extname(filePath).toLowerCase()
-  const mime = extension === '.png'
+  const ext = path.extname(filePath).toLowerCase()
+  let targetPath = filePath
+  if (ext === '.heic' || ext === '.heif') {
+    targetPath = convertHeicToJpegCached(filePath)
+  }
+
+  const buffer = await fs.promises.readFile(targetPath)
+  const targetExt = path.extname(targetPath).toLowerCase()
+  const mime = targetExt === '.png'
     ? 'image/png'
-    : extension === '.webp'
+    : targetExt === '.webp'
       ? 'image/webp'
       : 'image/jpeg'
 
@@ -104,11 +149,17 @@ async function fileToDataUrlAsync(filePath: string): Promise<string> {
 }
 
 function fileToDataUrl(filePath: string): string {
-  const buffer = fs.readFileSync(filePath)
-  const extension = path.extname(filePath).toLowerCase()
-  const mime = extension === '.png'
+  const ext = path.extname(filePath).toLowerCase()
+  let targetPath = filePath
+  if (ext === '.heic' || ext === '.heif') {
+    targetPath = convertHeicToJpegCached(filePath)
+  }
+
+  const buffer = fs.readFileSync(targetPath)
+  const targetExt = path.extname(targetPath).toLowerCase()
+  const mime = targetExt === '.png'
     ? 'image/png'
-    : extension === '.webp'
+    : targetExt === '.webp'
       ? 'image/webp'
       : 'image/jpeg'
 
@@ -119,7 +170,7 @@ ipcMain.handle('open-image-dialog', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog({
     title: 'Select images',
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'] }],
   })
 
   if (canceled || !filePaths.length) {
@@ -190,15 +241,32 @@ ipcMain.handle('save-project', async (_event, project: unknown) => {
   return { ok: true, filePath: normalizedPath }
 })
 
-ipcMain.handle('save-export', async (_event, payload: { dataUrls: string[]; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => {
+ipcMain.handle('autosave-project', async (_event, payload: { dir: string; fileName: string; project: unknown }) => {
+  try {
+    const targetDir = payload.dir
+    if (!fs.existsSync(targetDir)) {
+      await fs.promises.mkdir(targetDir, { recursive: true })
+    }
+    const targetPath = path.join(targetDir, payload.fileName)
+    await fs.promises.writeFile(targetPath, JSON.stringify(payload.project, null, 2), 'utf8')
+    return { ok: true, filePath: targetPath }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Autosave failed.' }
+  }
+})
+
+ipcMain.handle('save-export', async (_event, payload: { buffers?: ArrayBuffer[]; dataUrls?: string[]; defaultName: string; format?: string; dpi?: number }) => {
   const format = payload.format ?? 'png'
-  const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : 'png'
+  const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : format === 'webp' ? 'webp' : 'png'
   const defaultName = payload.defaultName.endsWith(`.${extension}`) ? payload.defaultName : `${payload.defaultName.replace(/\.[^.]+$/, '') || 'export'}.${extension}`
 
   const { canceled, filePath } = await dialog.showSaveDialog({
     title: 'Save print sheet',
     defaultPath: defaultName,
-    filters: [{ name: format === 'pdf' ? 'PDF Document' : format === 'jpeg' ? 'JPEG Image' : 'PNG Image', extensions: [extension] }],
+    filters: [{
+      name: format === 'pdf' ? 'PDF Document' : format === 'jpeg' ? 'JPEG Image' : format === 'webp' ? 'WebP Image' : 'PNG Image',
+      extensions: [extension],
+    }],
   })
 
   if (canceled || !filePath) {
@@ -206,17 +274,30 @@ ipcMain.handle('save-export', async (_event, payload: { dataUrls: string[]; defa
   }
 
   const normalizedPath = filePath.toLowerCase().endsWith(`.${extension}`) ? filePath : `${filePath}.${extension}`
-  const dataUrls = payload.dataUrls || []
+  
+  // Convert buffers or dataUrls into Buffer array
+  let nodeBuffers: Buffer[] = []
+  if (Array.isArray(payload.buffers) && payload.buffers.length > 0) {
+    nodeBuffers = payload.buffers.map((buf) => Buffer.from(buf))
+  } else if (Array.isArray(payload.dataUrls) && payload.dataUrls.length > 0) {
+    nodeBuffers = payload.dataUrls.map((dataUrl) => {
+      const matches = dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/)
+      const base64 = matches ? matches[1] : dataUrl.replace(/^data:image\/.*;base64,/, '')
+      return Buffer.from(base64, 'base64')
+    })
+  }
+
+  if (nodeBuffers.length === 0) {
+    return { ok: false, error: 'No image data to save.' }
+  }
 
   if (format === 'pdf') {
     const pdfDoc = await PDFDocument.create()
     const pointsPerPixel = 72 / Math.max(1, payload.dpi ?? 300)
 
-    for (const dataUrl of dataUrls) {
-      const matches = dataUrl.match(/^data:image\/(png|jpeg);base64,(.+)$/)
-      const isPng = (matches?.[1] ?? 'png') === 'png'
-      const base64 = matches ? matches[2] : dataUrl.replace(/^data:image\/.*;base64,/, '')
-      const imageBytes = Buffer.from(base64, 'base64')
+    for (const imageBytes of nodeBuffers) {
+      // Check if image is PNG or JPEG by magic bytes or fallback
+      const isPng = imageBytes[0] === 0x89 && imageBytes[1] === 0x50
       const image = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes)
       const page = pdfDoc.addPage([image.width * pointsPerPixel, image.height * pointsPerPixel])
       const scale = Math.min(page.getWidth() / image.width, page.getHeight() / image.height)
@@ -235,12 +316,9 @@ ipcMain.handle('save-export', async (_event, payload: { dataUrls: string[]; defa
     return { ok: true, filePath: normalizedPath }
   }
 
-  for (let i = 0; i < dataUrls.length; i++) {
-    const p = dataUrls.length === 1 ? normalizedPath : normalizedPath.replace(new RegExp(`\\.${extension}$`, 'i'), `-${i + 1}.${extension}`)
-    const matches = dataUrls[i].match(new RegExp(`^data:image\\/(png|jpeg);base64,(.+)$`))
-    const base64 = matches ? matches[2] : dataUrls[i].replace(/^data:image\/.*;base64,/, '')
-    const buffer = Buffer.from(base64, 'base64')
-    await fs.promises.writeFile(p, buffer)
+  for (let i = 0; i < nodeBuffers.length; i++) {
+    const p = nodeBuffers.length === 1 ? normalizedPath : normalizedPath.replace(new RegExp(`\\.${extension}$`, 'i'), `-${i + 1}.${extension}`)
+    await fs.promises.writeFile(p, nodeBuffers[i])
   }
 
   return { ok: true, filePath: normalizedPath }
@@ -425,6 +503,25 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(() => {
+  protocol.handle('polaroid-file', async (request) => {
+    try {
+      // URL format: polaroid-file://local/<encodedFilePath>
+      const parsed = new URL(request.url)
+      const pathname = parsed.pathname.startsWith('/') ? parsed.pathname.slice(1) : parsed.pathname
+      const rawPath = decodeURIComponent(pathname)
+      const ext = path.extname(rawPath).toLowerCase()
+
+      let finalPath = rawPath
+      if (ext === '.heic' || ext === '.heif') {
+        finalPath = convertHeicToJpegCached(rawPath)
+      }
+
+      return await net.fetch(pathToFileURL(finalPath).toString())
+    } catch (err) {
+      return new Response(`Failed to load file: ${err instanceof Error ? err.message : String(err)}`, { status: 404 })
+    }
+  })
+
   buildAppMenu()
   createWindow()
 })

@@ -78,7 +78,8 @@ export function createBlurFillCanvas(
   const bleed = blurRadius * 2
   context.save()
   if ('filter' in (context as unknown as Record<string, unknown>)) {
-    ;(context as unknown as { filter: string }).filter = `blur(${blurRadius}px)`
+    const ctxWithFilter = context as unknown as { filter: string }
+    ctxWithFilter.filter = `blur(${blurRadius}px)`
     context.drawImage(foreground, -bleed, -bleed, canvas.width + bleed * 2, canvas.height + bleed * 2)
   } else {
     // Fallback when canvas blur filters are unsupported: shrink then enlarge.

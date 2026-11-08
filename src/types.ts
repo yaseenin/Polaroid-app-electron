@@ -22,7 +22,7 @@ export type CropHandle = 'nw' | 'ne' | 'sw' | 'se'
 export type CropAspect = 'Free' | 'Square' | 'Mini' | 'Wide'
 export type CropCursor = 'crosshair' | 'move' | 'nwse-resize' | 'nesw-resize'
 
-export type ExportFormat = 'png' | 'jpeg' | 'pdf'
+export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'pdf'
 export type ExportOrientation = 'portrait' | 'landscape'
 
 export type EditorSnapshot = {

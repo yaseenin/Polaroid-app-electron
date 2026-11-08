@@ -1,4 +1,4 @@
-import { ipcRenderer, contextBridge } from 'electron'
+import { ipcRenderer, contextBridge, webUtils } from 'electron'
 
 contextBridge.exposeInMainWorld('ipcRenderer', {
   on(...args: Parameters<typeof ipcRenderer.on>) {
@@ -20,6 +20,20 @@ contextBridge.exposeInMainWorld('ipcRenderer', {
 })
 
 contextBridge.exposeInMainWorld('polaroidEngine', {
+  getPathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return (file as File & { path?: string }).path || ''
+    }
+  },
+  onMenuAction: (callback: (action: string, payload?: unknown) => void) => {
+    const handler = (_event: unknown, action: string, payload?: unknown) => callback(action, payload)
+    ipcRenderer.on('menu-action', handler)
+    return () => {
+      ipcRenderer.removeListener('menu-action', handler)
+    }
+  },
   openImagePicker: () => ipcRenderer.invoke('open-image-dialog') as Promise<{
     canceled: boolean
     filePaths: string[]
@@ -38,7 +52,19 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
     canceled?: boolean
     filePath?: string
   }>,
-  saveExport: (payload: { dataUrls: string[]; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => ipcRenderer.invoke('save-export', payload),
+  autosaveProject: (payload: { dir: string; fileName: string; project: unknown }) =>
+    ipcRenderer.invoke('autosave-project', payload) as Promise<{
+      ok: boolean
+      filePath?: string
+      error?: string
+    }>,
+  saveExport: (payload: { buffers?: ArrayBuffer[]; dataUrls?: string[]; defaultName: string; format?: string; dpi?: number }) =>
+    ipcRenderer.invoke('save-export', payload) as Promise<{
+      ok: boolean
+      canceled?: boolean
+      filePath?: string
+      error?: string
+    }>,
   processImages: (request: {
     files: string[]
     outputDir?: string

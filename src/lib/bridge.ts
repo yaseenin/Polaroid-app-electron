@@ -19,9 +19,9 @@ export type SaveResult = { ok: boolean; canceled?: boolean; filePath?: string; e
 export type OpenProjectResult = { canceled: boolean; project?: unknown; error?: string }
 
 export type ExportPayload = {
-  /** One encoded image (PNG or JPEG bytes) per sheet. */
+  /** One encoded image (PNG, JPEG, or WebP bytes) per sheet. */
   buffers: ArrayBuffer[]
-  mime: 'image/png' | 'image/jpeg'
+  mime: 'image/png' | 'image/jpeg' | 'image/webp'
   defaultName: string
   format: string
   dpi: number

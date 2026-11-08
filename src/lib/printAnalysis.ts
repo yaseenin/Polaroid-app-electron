@@ -1,9 +1,11 @@
 import type { AdjustmentSettings } from '../engine/polaroidEngine'
 import { clamp } from './canvasUtils'
 
-/** Prints come out darker and flatter than a screen, so aim a little brighter than "correct". */
-const PRINT_TARGET_MEDIAN = 0.52
-const PRINT_SHARPEN = 0.3
+/** Prints come out substantially darker, flatter, and with dot gain in the shadows compared to an RGB display.
+ * Target median is set to 0.58 (brightened midtones) and a baseline brightness lift is included. */
+const PRINT_TARGET_MEDIAN = 0.58
+const PRINT_SHARPEN = 0.35
+const PRINT_BASE_BRIGHTNESS = 1.06
 
 /**
  * Analyzes a photo and returns adjustment settings tuned for printing.
@@ -62,27 +64,32 @@ export function analyzeForPrint(image: HTMLImageElement, base: AdjustmentSetting
   const p95 = pct(0.95)
   const p99 = pct(0.99)
 
-  // 1. Exposure (engine gain = exposure * brightness, so brightness stays 1).
-  //    Brighten toward the print target, but never push the top 1% far past white.
+  // 1. Exposure & Brightness (engine gain = exposure * brightness).
+  //    Brighten toward the print target (median ~0.58) while preventing specular blowout on p99.
   const wanted = PRINT_TARGET_MEDIAN / Math.max(0.08, median)
-  const clipLimit = 1.1 / Math.max(0.25, p99)
-  const exposure = clamp(Math.min(wanted, clipLimit), 0.85, 1.8)
+  const clipLimit = 1.15 / Math.max(0.25, p99)
+  const exposure = clamp(Math.min(wanted, clipLimit), 0.95, 2.0)
+  const brightness = PRINT_BASE_BRIGHTNESS
+  const totalGain = exposure * brightness
 
   // 2. Contrast (engine: luminance around 0.5, applied after gain).
-  const spread = (p95 - p5) * exposure
-  const contrast = spread < 0.45 ? 1.18 : spread < 0.6 ? 1.1 : spread > 0.9 ? 0.97 : 1.03
-  const tone = (v: number) => clamp((v * exposure - 0.5) * contrast + 0.5, 0, 1)
+  //    In print, keep midtones open rather than crushed.
+  const spread = (p95 - p5) * totalGain
+  const contrast = spread < 0.45 ? 1.14 : spread < 0.6 ? 1.07 : spread > 0.9 ? 0.95 : 1.02
+  const tone = (v: number) => clamp((v * totalGain - 0.5) * contrast + 0.5, 0, 1)
 
   // 3. Black point (engine applies levels after gain + contrast).
-  const levelsBlack = clamp(tone(p1) * 0.8, 0, 0.06)
+  //    Keep black point low/clean so shadows don't ink-bleed or clog.
+  const levelsBlack = clamp(tone(p1) * 0.6, 0, 0.04)
   const afterLevels = (v: number) => clamp((tone(v) - levelsBlack) / (1 - levelsBlack), 0, 1)
 
-  // 4. Shadows / highlights, judged on the values the engine will actually see.
+  // 4. Shadows / highlights:
+  //    Open up shadows aggressively because paper/ink dot gain turns dark tones muddy.
   const p10After = afterLevels(p10)
   const p95After = afterLevels(p95)
   const p99After = afterLevels(p99)
-  const shadows = clamp((0.2 - p10After) * 1.8, 0, 0.45)
-  const highlights = p99After > 0.98 ? 0.85 : p95After > 0.9 ? 0.93 : 1
+  const shadows = clamp(Math.max(0.12, (0.28 - p10After) * 1.9), 0.08, 0.55)
+  const highlights = p99After > 0.98 ? 0.88 : p95After > 0.9 ? 0.94 : 1
 
   // 5. Saturation only; the engine's "vibrance" is just another saturation multiplier.
   const meanSat = satSum / count
@@ -100,7 +107,7 @@ export function analyzeForPrint(image: HTMLImageElement, base: AdjustmentSetting
   return {
     ...base,
     exposure,
-    brightness: 1,
+    brightness,
     contrast,
     levelsBlack,
     levelsMid: 1,
