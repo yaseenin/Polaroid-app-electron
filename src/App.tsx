@@ -169,6 +169,7 @@ function App() {
   const {
     cropMode,
     setCropMode,
+    toggleCropMode,
     cropAspect,
     setCropAspect,
     cropRotation,
@@ -633,8 +634,10 @@ function App() {
           context.imageSmoothingQuality = 'high'
           context.drawImage(display, 0, 0, target.width, target.height)
 
-          if (cropMode && cropRectRef.current) {
-            drawCropOverlay(target, processed, cropRectRef.current, true, cropAspect)
+          if (cropMode) {
+            const rect = cropRectRef.current ?? { x: 0, y: 0, width: target.width, height: target.height }
+            if (!cropRectRef.current) setCropRectFor(activePhoto.id, rect)
+            drawCropOverlay(target, processed, rect, true, cropAspect)
           }
 
           setHistogram(getHistogram(target))
@@ -824,7 +827,7 @@ function App() {
       }
       if (key === 'c') {
         event.preventDefault()
-        setCropMode((current) => !current)
+        toggleCropMode()
         return
       }
       if (key === 'r') {
@@ -920,7 +923,7 @@ function App() {
           <aside className="tool-rail">
             <div className="tool-group">
               <button title="Open Images" className="tool-button" aria-label="Open Images" onClick={handleOpenNativeDialog}>📂</button>
-              <button title="Crop (Esc to leave)" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={() => setCropMode((current) => !current)}>◧</button>
+              <button title="Crop (Esc to leave)" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={toggleCropMode}>◧</button>
               <div className="tool-separator"></div>
               <button title="Undo (Ctrl+Z)" className="tool-button" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
               <button title="Redo (Ctrl+Shift+Z)" className="tool-button" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>

@@ -21,7 +21,6 @@ export function useAutosave(params: Params) {
   const [lastAutosave, setLastAutosave] = useState<{ time: string; target: string } | null>(null)
   const dirtyRef = useRef(false)
   const savingRef = useRef(false)
-  const recoveryCheckedRef = useRef(false)
 
   const markDirty = useCallback(() => {
     dirtyRef.current = true
@@ -66,25 +65,6 @@ export function useAutosave(params: Params) {
     const id = window.setInterval(() => void runAutosave(), AUTOSAVE_INTERVAL_MS)
     return () => window.clearInterval(id)
   }, [runAutosave])
-
-  // Offer to recover a browser-storage autosave once on startup.
-  useEffect(() => {
-    if (recoveryCheckedRef.current) return
-    recoveryCheckedRef.current = true
-    readAutosave()
-      .then((record) => {
-        if (!record?.project?.photos?.length) return
-        const when = new Date(record.savedAt).toLocaleString()
-        if (window.confirm(`Recover the autosaved project from ${when} (${record.project.photos.length} photo(s))?`)) {
-          try {
-            paramsRef.current.restoreProject(record.project, 'Recovered autosave with')
-          } catch (error) {
-            paramsRef.current.setStatus(error instanceof Error ? error.message : 'Unable to recover the autosave.')
-          }
-        }
-      })
-      .catch(() => {})
-  }, [])
 
   const recoverAutosave = useCallback(async () => {
     const { restoreProject, openProject, setStatus } = paramsRef.current

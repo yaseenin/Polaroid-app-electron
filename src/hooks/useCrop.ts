@@ -8,7 +8,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from 'react'
-import { clampCropRectToCanvas, drawCropOverlay, getAspectValue, resizeCropRect } from '../lib/canvasUtils'
+import { clamp, clampCropRectToCanvas, drawCropOverlay, getAspectValue, resizeCropRect } from '../lib/canvasUtils'
 import type { CropApplied, CropAspect, CropCursor, CropHandle, CropRect } from '../types'
 
 type CropDrag = {
@@ -56,6 +56,43 @@ export function useCrop({
     [],
   )
 
+  const toggleCropMode = () => {
+    if (cropMode) {
+      setCropMode(false)
+      return
+    }
+
+    const canvas = previewCanvasRef.current
+    const source = processedPreviewCanvasRef.current
+    if (activePhotoId !== undefined && canvas && source) {
+      setCropRectFor(activePhotoId, { x: 0, y: 0, width: canvas.width, height: canvas.height })
+    }
+    setCropMode(true)
+  }
+
+  const changeCropAspect = (aspect: CropAspect) => {
+    setCropAspect(aspect)
+
+    const ratio = getAspectValue(aspect)
+    const canvas = previewCanvasRef.current
+    if (!ratio || !canvas || activePhotoId === undefined || !cropRect) return
+
+    let width = cropRect.width
+    let height = cropRect.height
+    if (width / height > ratio) {
+      width = height * ratio
+    } else {
+      height = width / ratio
+    }
+
+    setCropRectFor(activePhotoId, {
+      x: cropRect.x + (cropRect.width - width) / 2,
+      y: cropRect.y + (cropRect.height - height) / 2,
+      width,
+      height,
+    })
+  }
+
   const setCropAppliedFor = useCallback(
     (photoId: number, applied: CropApplied | null) =>
       setCropAppliedByPhoto((current) => ({ ...current, [photoId]: applied })),
@@ -74,8 +111,12 @@ export function useCrop({
     const canvas = previewCanvasRef.current
     const source = processedPreviewCanvasRef.current
     if (!cropMode || !canvas || !source) return
+    if (activePhotoId !== undefined && !cropRect) {
+      setCropRectFor(activePhotoId, { x: 0, y: 0, width: canvas.width, height: canvas.height })
+      return
+    }
     drawCropOverlay(canvas, source, cropRect, true, cropAspect)
-  }, [cropMode, cropRect, cropAspect, previewCanvasRef, processedPreviewCanvasRef])
+  }, [cropMode, cropRect, cropAspect, activePhotoId, previewCanvasRef, processedPreviewCanvasRef, setCropRectFor])
 
   /* ---- Pointer interaction ---- */
   const getHandleAtPoint = (x: number, y: number): CropHandle | null => {
@@ -169,16 +210,14 @@ export function useCrop({
         aspectRatio,
       )
     } else if (drag.mode === 'move') {
-      nextRect = clampCropRectToCanvas(
-        {
-          x: drag.startRect.x + (x - drag.startX),
-          y: drag.startRect.y + (y - drag.startY),
-          width: drag.startRect.width,
-          height: drag.startRect.height,
-        },
-        canvas.width,
-        canvas.height,
-      )
+      const width = Math.min(drag.startRect.width, canvas.width)
+      const height = Math.min(drag.startRect.height, canvas.height)
+      nextRect = {
+        x: clamp(drag.startRect.x + (x - drag.startX), 0, canvas.width - width),
+        y: clamp(drag.startRect.y + (y - drag.startY), 0, canvas.height - height),
+        width,
+        height,
+      }
     } else if (drag.handle) {
       nextRect = resizeCropRect(drag.handle, drag.startRect, x, y, canvas.width, canvas.height, aspectRatio)
     } else {
@@ -272,8 +311,9 @@ export function useCrop({
   return {
     cropMode,
     setCropMode,
+    toggleCropMode,
     cropAspect,
-    setCropAspect,
+    setCropAspect: changeCropAspect,
     cropRotation,
     setCropRotation,
     cropCursor,
