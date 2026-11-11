@@ -37,6 +37,93 @@ const RUST_BINARY_NAME = process.platform === 'win32'
 const RUST_RELEASE_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'release', RUST_BINARY_NAME)
 const RUST_DEBUG_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'debug', RUST_BINARY_NAME)
 
+// ---- DPI metadata injection for raster exports ----
+
+const crc32Table = new Uint32Array(256)
+for (let i = 0; i < 256; i++) {
+  let c = i
+  for (let j = 0; j < 8; j++) {
+    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+  }
+  crc32Table[i] = c
+}
+
+function crc32(buf: Buffer): number {
+  let crc = 0xFFFFFFFF
+  for (let i = 0; i < buf.length; i++) {
+    crc = crc32Table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8)
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0
+}
+
+function injectPngDpi(buffer: Buffer, dpi: number): Buffer {
+  const ppm = Math.round(dpi * 39.3700787) // pixels per meter
+
+  const signature = buffer.subarray(0, 8)
+  const rest = buffer.subarray(8)
+
+  // Find end of IHDR chunk to insert pHys after it
+  let offset = 0
+  let ihdrEnd = 0
+  while (offset + 8 <= rest.length) {
+    const length = rest.readUInt32BE(offset)
+    const type = rest.subarray(offset + 4, offset + 8).toString('latin1')
+    const chunkEnd = offset + 12 + length
+    if (type === 'IHDR') {
+      ihdrEnd = chunkEnd
+      break
+    }
+    offset = chunkEnd
+  }
+
+  const data = Buffer.alloc(9)
+  data.writeUInt32BE(ppm, 0)
+  data.writeUInt32BE(ppm, 4)
+  data[8] = 1 // unit specifier: meter
+
+  const type = Buffer.from('pHys')
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(9, 0)
+
+  const crcInput = Buffer.concat([type, data])
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(crcInput), 0)
+
+  const pHysChunk = Buffer.concat([length, type, data, crc])
+
+  return Buffer.concat([signature, rest.subarray(0, ihdrEnd), pHysChunk, rest.subarray(ihdrEnd)])
+}
+
+function injectJpegDpi(buffer: Buffer, dpi: number): Buffer {
+  const app0Data = Buffer.alloc(14)
+  app0Data.write('JFIF\0', 0, 'latin1')
+  app0Data[5] = 1 // version major
+  app0Data[6] = 1 // version minor
+  app0Data[7] = 1 // density units: 1 = dots per inch
+  app0Data.writeUInt16BE(dpi, 8) // Xdensity
+  app0Data.writeUInt16BE(dpi, 10) // Ydensity
+  app0Data[12] = 0 // thumbnail width
+  app0Data[13] = 0 // thumbnail height
+
+  const app0Length = Buffer.alloc(2)
+  app0Length.writeUInt16BE(16, 0) // 2 (length field) + 14 (data)
+
+  const app0Segment = Buffer.concat([Buffer.from([0xFF, 0xE0]), app0Length, app0Data])
+
+  if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xD8) {
+    if (buffer.length >= 4 && buffer[2] === 0xFF && buffer[3] === 0xE0) {
+      // APP0 already exists, replace it
+      const existingLength = buffer.readUInt16BE(4)
+      const existingEnd = 4 + existingLength
+      return Buffer.concat([app0Segment, buffer.subarray(existingEnd)])
+    }
+    // Insert APP0 after SOI
+    return Buffer.concat([buffer.subarray(0, 2), app0Segment, buffer.subarray(2)])
+  }
+
+  return buffer
+}
+
 type RustProcessRequest = {
   files: string[]
   outputDir?: string
@@ -316,9 +403,12 @@ ipcMain.handle('save-export', async (_event, payload: { buffers?: ArrayBuffer[];
     return { ok: true, filePath: normalizedPath }
   }
 
+  const dpi = Math.max(1, payload.dpi ?? 300)
+
   for (let i = 0; i < nodeBuffers.length; i++) {
     const p = nodeBuffers.length === 1 ? normalizedPath : normalizedPath.replace(new RegExp(`\\.${extension}$`, 'i'), `-${i + 1}.${extension}`)
-    await fs.promises.writeFile(p, nodeBuffers[i])
+    const buffer = format === 'png' ? injectPngDpi(nodeBuffers[i], dpi) : format === 'jpeg' ? injectJpegDpi(nodeBuffers[i], dpi) : nodeBuffers[i]
+    await fs.promises.writeFile(p, buffer)
   }
 
   return { ok: true, filePath: normalizedPath }
