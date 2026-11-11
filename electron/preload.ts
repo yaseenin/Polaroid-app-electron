@@ -58,34 +58,23 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
       filePath?: string
       error?: string
     }>,
-  saveExport: (payload: { buffers?: ArrayBuffer[]; dataUrls?: string[]; defaultName: string; format?: string; dpi?: number }) =>
+  saveExport: (payload: {
+    buffers?: ArrayBuffer[]
+    dataUrls?: string[]
+    defaultName: string
+    format?: string
+    dpi?: number
+    pdfPages?: Array<{
+      width: number
+      height: number
+      images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number }>
+      lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }>
+    }>
+  }) =>
     ipcRenderer.invoke('save-export', payload) as Promise<{
       ok: boolean
       canceled?: boolean
       filePath?: string
       error?: string
     }>,
-  processImages: (request: {
-    files: string[]
-    outputDir?: string
-    settings?: {
-      exposure?: number
-      brightness?: number
-      contrast?: number
-      gamma?: number
-      saturation?: number
-      sharpen?: number
-      temperature?: number
-      vignette?: number
-      autoRotate?: boolean
-      format?: 'jpeg' | 'jpg' | 'pdf'
-      dpi?: number
-    }
-  }) => ipcRenderer.invoke('rust:process', request) as Promise<{
-    ok: boolean
-    outputDir?: string
-    files?: string[]
-    message?: string
-    error?: string
-  }>,
 })

@@ -455,30 +455,50 @@ function App() {
     setStatus(`${label} ${restoredPhotos.length} photo(s)`)
   }
 
-  const { projectInputRef, buildProject, restoreProject, handleSaveProject, handleOpenProject, handleProjectFileSelected } =
-    useProject({
-      photos,
-      snapshot: {
-        settingsByPhoto,
-        cropAppliedByPhoto,
-        activeSettings,
-        selectedPhotoIndex,
-        preset,
-        paperSize,
-        exportFormat,
-        exportPageCount,
-        exportOrientation,
-        exportAutoRotate,
-        exportGridOffsetX,
-        exportGridOffsetY,
-        fillBlur,
-      },
-      nextPhotoId,
-      loadImageResource,
-      applyRestored,
-      setStatus,
-      setLastOutputDir,
-    })
+  const {
+    projectInputRef,
+    buildProject,
+    restoreProject,
+    handleSaveProject,
+    handleOpenProject,
+    handleProjectFileSelected,
+    handleDroppedProjectFile,
+  } = useProject({
+    photos,
+    snapshot: {
+      settingsByPhoto,
+      cropAppliedByPhoto,
+      activeSettings,
+      selectedPhotoIndex,
+      preset,
+      paperSize,
+      exportFormat,
+      exportPageCount,
+      exportOrientation,
+      exportAutoRotate,
+      exportGridOffsetX,
+      exportGridOffsetY,
+      fillBlur,
+    },
+    nextPhotoId,
+    loadImageResource,
+    applyRestored,
+    setStatus,
+    setLastOutputDir,
+  })
+
+  const handleDroppedFiles = (files: File[]) => {
+    const projectFiles = files.filter((file) => /\.(json|polaroid)$/i.test(file.name))
+    if (projectFiles.length > 1 || (projectFiles.length === 1 && files.length > 1)) {
+      setStatus('Drop one project file by itself, or drop image files separately.')
+      return
+    }
+    if (projectFiles.length === 1) {
+      void handleDroppedProjectFile(projectFiles[0])
+      return
+    }
+    appendFiles(files)
+  }
 
   const { lastAutosave, markDirty, recoverAutosave } = useAutosave({
     photos,
@@ -699,6 +719,78 @@ function App() {
       const maxImagesPerPage = layout.cols * layout.rows
       // PDF pages use JPEG: embedding is a straight copy (PNG must be decoded) and the file stays far smaller.
       const mime = exportFormat === 'png' ? 'image/png' : exportFormat === 'webp' ? 'image/webp' : 'image/jpeg'
+      const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat}`
+      const bridge = getBridge()
+
+      if (exportFormat === 'pdf' && bridge?.saveExport) {
+        const presetDefinition = PRESETS[preset]
+        const pdfPages = []
+
+        for (let i = 0; i < images.length; i += maxImagesPerPage) {
+          const pageImages = images.slice(i, i + maxImagesPerPage)
+          const pageLayout = buildSheetLayout(presetDefinition, pageImages.length, paperSize, {
+            offsetX: exportGridOffsetX,
+            offsetY: exportGridOffsetY,
+          })
+          const usedCols = Math.max(1, Math.ceil(pageImages.length / pageLayout.rows))
+          const usedRows = usedCols > 1 ? pageLayout.rows : Math.max(1, pageImages.length)
+          const gridW = usedCols * presetDefinition.frameW
+          const gridH = usedRows * presetDefinition.frameH
+          const pageImagesForPdf = await Promise.all(
+            pageImages.map(async (image, index) => {
+              const col = Math.floor(index / pageLayout.rows)
+              const row = index % pageLayout.rows
+              return {
+                buffer: await canvasToBytes(image, 'image/jpeg', 0.95),
+                x: pageLayout.marginX + col * presetDefinition.frameW + presetDefinition.offsetX,
+                y: pageLayout.marginY + row * presetDefinition.frameH + presetDefinition.offsetY,
+                width: presetDefinition.photoW,
+                height: presetDefinition.photoH,
+              }
+            }),
+          )
+          const lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }> = []
+
+          for (let mark = 0; mark <= usedCols; mark += 1) {
+            const x = pageLayout.marginX + mark * presetDefinition.frameW
+            lines.push(
+              { x1: x, y1: pageLayout.marginY - pageLayout.markLength, x2: x, y2: pageLayout.marginY, width: 2 },
+              { x1: x, y1: pageLayout.marginY + gridH, x2: x, y2: pageLayout.marginY + gridH + pageLayout.markLength, width: 2 },
+            )
+          }
+          for (let mark = 0; mark <= usedRows; mark += 1) {
+            const y = pageLayout.marginY + mark * presetDefinition.frameH
+            lines.push(
+              { x1: pageLayout.marginX - pageLayout.markLength, y1: y, x2: pageLayout.marginX, y2: y, width: 2 },
+              { x1: pageLayout.marginX + gridW, y1: y, x2: pageLayout.marginX + gridW + pageLayout.markLength, y2: y, width: 2 },
+            )
+          }
+
+          pdfPages.push({
+            width: pageLayout.sheetW,
+            height: pageLayout.sheetH,
+            images: pageImagesForPdf,
+            lines,
+          })
+        }
+
+        const result = await bridge.saveExport({
+          mime: 'image/jpeg',
+          defaultName: fileName,
+          format: 'pdf',
+          dpi: 300,
+          pdfPages,
+        })
+        if (result.canceled) {
+          setStatus('Export cancelled.')
+          return
+        }
+        if (!result.ok) throw new Error(result.error ?? 'Export failed.')
+
+        setLastOutputDir(result.filePath ?? null)
+        setStatus(`Exported ${images.length} image(s) to ${result.filePath ?? 'a printable sheet'}.`)
+        return
+      }
 
       // Encode each sheet to bytes right away so the huge canvas can be freed before the next one is built.
       const buffers: ArrayBuffer[] = []
@@ -711,9 +803,6 @@ function App() {
         buffers.push(await canvasToBytes(sheet, mime, 0.95))
       }
 
-      const fileName = `${PRESETS[preset].label.toLowerCase().replace(/\s+/g, '-')}-sheet.${exportFormat}`
-
-      const bridge = getBridge()
       if (bridge?.saveExport) {
         const result = await bridge.saveExport({
           buffers,
@@ -982,7 +1071,7 @@ function App() {
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
                 event.preventDefault()
-                appendFiles(Array.from(event.dataTransfer?.files ?? []))
+                handleDroppedFiles(Array.from(event.dataTransfer?.files ?? []))
               }}
             >
               <canvas

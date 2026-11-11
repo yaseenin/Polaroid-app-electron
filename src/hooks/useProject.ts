@@ -172,11 +172,8 @@ export function useProject(params: Params) {
     }
   }, [restoreProject])
 
-  const handleProjectFileSelected = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0]
-      event.target.value = ''
-      if (!file) return
+  const handleDroppedProjectFile = useCallback(
+    async (file: File) => {
       try {
         restoreProject(JSON.parse(await file.text()) as ProjectFile, 'Opened project with')
       } catch (error) {
@@ -192,6 +189,16 @@ export function useProject(params: Params) {
     [restoreProject],
   )
 
+  const handleProjectFileSelected = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      event.target.value = ''
+      if (!file) return
+      await handleDroppedProjectFile(file)
+    },
+    [handleDroppedProjectFile],
+  )
+
   return {
     projectInputRef,
     buildProject,
@@ -199,5 +206,6 @@ export function useProject(params: Params) {
     handleSaveProject,
     handleOpenProject,
     handleProjectFileSelected,
+    handleDroppedProjectFile,
   }
 }

@@ -35,29 +35,18 @@ interface Window {
       error?: string
     }>
     saveProject: (project: unknown) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
-    saveExport: (payload: { dataUrls: string[]; defaultName: string; format?: 'png' | 'jpeg' | 'pdf'; dpi?: number }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
-    processImages: (request: {
-      files: string[]
-      outputDir?: string
-      settings?: {
-        exposure?: number
-        brightness?: number
-        contrast?: number
-        gamma?: number
-        saturation?: number
-        sharpen?: number
-        temperature?: number
-        vignette?: number
-        autoRotate?: boolean
-        format?: 'jpeg' | 'jpg' | 'pdf'
-        dpi?: number
-      }
-    }) => Promise<{
-      ok: boolean
-      outputDir?: string
-      files?: string[]
-      message?: string
-      error?: string
-    }>
+    saveExport: (payload: {
+      buffers?: ArrayBuffer[]
+      dataUrls?: string[]
+      defaultName: string
+      format?: 'png' | 'jpeg' | 'pdf'
+      dpi?: number
+      pdfPages?: Array<{
+        width: number
+        height: number
+        images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number }>
+        lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }>
+      }>
+    }) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string }>
   }
 }

@@ -20,11 +20,17 @@ export type OpenProjectResult = { canceled: boolean; project?: unknown; error?: 
 
 export type ExportPayload = {
   /** One encoded image (PNG, JPEG, or WebP bytes) per sheet. */
-  buffers: ArrayBuffer[]
+  buffers?: ArrayBuffer[]
   mime: 'image/png' | 'image/jpeg' | 'image/webp'
   defaultName: string
   format: string
   dpi: number
+  pdfPages?: Array<{
+    width: number
+    height: number
+    images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number }>
+    lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }>
+  }>
 }
 
 /** Everything the preload script exposes as `window.polaroidEngine`. */

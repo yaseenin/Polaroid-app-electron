@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, net, type MenuItemConstructorOptions } from 'electron'
-import { PDFDocument } from 'pdf-lib'
-import { spawn, spawnSync } from 'node:child_process'
+import { PDFDocument, rgb } from 'pdf-lib'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,12 +30,21 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 
 let win: BrowserWindow | null
 
-const RUST_MANIFEST_PATH = path.join(process.env.APP_ROOT, 'rust', 'Cargo.toml')
-const RUST_BINARY_NAME = process.platform === 'win32'
-  ? 'polaroid_print_imposition_engine.exe'
-  : 'polaroid_print_imposition_engine'
-const RUST_RELEASE_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'release', RUST_BINARY_NAME)
-const RUST_DEBUG_BINARY_PATH = path.join(process.env.APP_ROOT, 'rust', 'target', 'debug', RUST_BINARY_NAME)
+type PdfExportPage = {
+  width: number
+  height: number
+  images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number }>
+  lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }>
+}
+
+type SaveExportPayload = {
+  buffers?: ArrayBuffer[]
+  dataUrls?: string[]
+  defaultName: string
+  format?: string
+  dpi?: number
+  pdfPages?: PdfExportPage[]
+}
 
 // ---- DPI metadata injection for raster exports ----
 
@@ -122,73 +131,6 @@ function injectJpegDpi(buffer: Buffer, dpi: number): Buffer {
   }
 
   return buffer
-}
-
-type RustProcessRequest = {
-  files: string[]
-  outputDir?: string
-  settings?: {
-    exposure?: number
-    brightness?: number
-    contrast?: number
-    gamma?: number
-    saturation?: number
-    sharpen?: number
-    temperature?: number
-    vignette?: number
-    autoRotate?: boolean
-    format?: 'jpeg' | 'jpg' | 'pdf'
-    dpi?: number
-  }
-}
-
-type RustProcessResponse = {
-  ok: boolean
-  outputDir?: string
-  files?: string[]
-  message?: string
-  error?: string
-}
-
-function ensureRustEngineReady(): string {
-  if (fs.existsSync(RUST_RELEASE_BINARY_PATH)) {
-    return RUST_RELEASE_BINARY_PATH
-  }
-  if (fs.existsSync(RUST_DEBUG_BINARY_PATH)) {
-    return RUST_DEBUG_BINARY_PATH
-  }
-
-  const cargoName = process.platform === 'win32' ? 'cargo.exe' : 'cargo'
-  const cargoHome = process.env.CARGO_HOME ?? path.join(os.homedir(), '.cargo')
-  const cargoPath = [
-    path.join(cargoHome, 'bin', cargoName),
-    ...(process.platform === 'darwin' ? ['/opt/homebrew/bin/cargo', '/usr/local/bin/cargo'] : []),
-  ].find((candidate) => fs.existsSync(candidate)) ?? cargoName
-
-  const result = spawnSync(cargoPath, ['build', '--release', '--manifest-path', RUST_MANIFEST_PATH, '--color', 'never'], {
-    cwd: process.env.APP_ROOT,
-    env: process.env,
-    encoding: 'utf8',
-  })
-
-  const spawnError = result.error as NodeJS.ErrnoException | undefined
-  if (spawnError?.code === 'ENOENT') {
-    throw new Error('Rust and Cargo are not installed or are unavailable. Install Rust from https://rustup.rs, restart the app, and try again.')
-  }
-
-  if (result.status !== 0) {
-    const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
-    throw new Error(output || 'Failed to build the Rust processing engine.')
-  }
-
-  if (fs.existsSync(RUST_RELEASE_BINARY_PATH)) {
-    return RUST_RELEASE_BINARY_PATH
-  }
-  if (fs.existsSync(RUST_DEBUG_BINARY_PATH)) {
-    return RUST_DEBUG_BINARY_PATH
-  }
-
-  throw new Error(`Rust engine binary was not found at ${RUST_RELEASE_BINARY_PATH}`)
 }
 
 function convertHeicToJpegCached(filePath: string): string {
@@ -342,7 +284,7 @@ ipcMain.handle('autosave-project', async (_event, payload: { dir: string; fileNa
   }
 })
 
-ipcMain.handle('save-export', async (_event, payload: { buffers?: ArrayBuffer[]; dataUrls?: string[]; defaultName: string; format?: string; dpi?: number }) => {
+ipcMain.handle('save-export', async (_event, payload: SaveExportPayload) => {
   const format = payload.format ?? 'png'
   const extension = format === 'jpeg' ? 'jpg' : format === 'pdf' ? 'pdf' : format === 'webp' ? 'webp' : 'png'
   const defaultName = payload.defaultName.endsWith(`.${extension}`) ? payload.defaultName : `${payload.defaultName.replace(/\.[^.]+$/, '') || 'export'}.${extension}`
@@ -374,13 +316,54 @@ ipcMain.handle('save-export', async (_event, payload: { buffers?: ArrayBuffer[];
     })
   }
 
-  if (nodeBuffers.length === 0) {
+  if (nodeBuffers.length === 0 && !(format === 'pdf' && payload.pdfPages?.length)) {
     return { ok: false, error: 'No image data to save.' }
   }
 
   if (format === 'pdf') {
     const pdfDoc = await PDFDocument.create()
     const pointsPerPixel = 72 / Math.max(1, payload.dpi ?? 300)
+
+    if (payload.pdfPages?.length) {
+      for (const pageData of payload.pdfPages) {
+        const pageWidth = pageData.width * pointsPerPixel
+        const pageHeight = pageData.height * pointsPerPixel
+        const page = pdfDoc.addPage([pageWidth, pageHeight])
+        page.drawRectangle({
+          x: 0,
+          y: 0,
+          width: pageWidth,
+          height: pageHeight,
+          color: rgb(1, 1, 1),
+        })
+
+        for (const imageData of pageData.images) {
+          const imageBuffer = Buffer.from(imageData.buffer)
+          const image = imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50
+            ? await pdfDoc.embedPng(imageBuffer)
+            : await pdfDoc.embedJpg(imageBuffer)
+          page.drawImage(image, {
+            x: imageData.x * pointsPerPixel,
+            y: pageHeight - (imageData.y + imageData.height) * pointsPerPixel,
+            width: imageData.width * pointsPerPixel,
+            height: imageData.height * pointsPerPixel,
+          })
+        }
+
+        for (const line of pageData.lines) {
+          page.drawLine({
+            start: { x: line.x1 * pointsPerPixel, y: pageHeight - line.y1 * pointsPerPixel },
+            end: { x: line.x2 * pointsPerPixel, y: pageHeight - line.y2 * pointsPerPixel },
+            thickness: line.width * pointsPerPixel,
+            color: rgb(0, 0, 0),
+          })
+        }
+      }
+
+      const pdfBytes = await pdfDoc.save()
+      await fs.promises.writeFile(normalizedPath, pdfBytes)
+      return { ok: true, filePath: normalizedPath }
+    }
 
     for (const imageBytes of nodeBuffers) {
       // Check if image is PNG or JPEG by magic bytes or fallback
@@ -414,104 +397,6 @@ ipcMain.handle('save-export', async (_event, payload: { buffers?: ArrayBuffer[];
   return { ok: true, filePath: normalizedPath }
 })
 
-ipcMain.handle('rust:process', async (_event, request: RustProcessRequest): Promise<RustProcessResponse> => {
-  try {
-    const files = (request.files ?? []).filter(Boolean)
-    if (files.length === 0) {
-      return { ok: false, error: 'No image files were provided for processing.' }
-    }
-
-    const binaryPath = ensureRustEngineReady()
-    const outputDir = request.outputDir ?? path.join(os.tmpdir(), 'polaroid_print_imposition_engine', `export_${Date.now()}`)
-    const settings = request.settings ?? {}
-    const args = ['--process', '--output-dir', outputDir]
-
-    for (const file of files) {
-      args.push('--file', file)
-    }
-
-    if (typeof settings.exposure === 'number') {
-      args.push('--exposure', settings.exposure.toString())
-    }
-    if (typeof settings.brightness === 'number') {
-      args.push('--brightness', settings.brightness.toString())
-    }
-    if (typeof settings.contrast === 'number') {
-      args.push('--contrast', settings.contrast.toString())
-    }
-    if (typeof settings.gamma === 'number') {
-      args.push('--gamma', settings.gamma.toString())
-    }
-    if (typeof settings.saturation === 'number') {
-      args.push('--saturation', settings.saturation.toString())
-    }
-    if (typeof settings.sharpen === 'number') {
-      args.push('--sharpen', settings.sharpen.toString())
-    }
-    if (typeof settings.temperature === 'number') {
-      args.push('--temperature', settings.temperature.toString())
-    }
-    if (typeof settings.vignette === 'number') {
-      args.push('--vignette', settings.vignette.toString())
-    }
-    if (typeof settings.autoRotate === 'boolean') {
-      args.push('--auto-rotate', settings.autoRotate ? 'true' : 'false')
-    }
-    if (settings.format) {
-      args.push('--format', settings.format)
-    }
-    if (typeof settings.dpi === 'number') {
-      args.push('--dpi', settings.dpi.toString())
-    }
-
-    const child = spawn(binaryPath, args, {
-      cwd: process.env.APP_ROOT,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout?.on('data', (chunk) => {
-      stdout += chunk.toString()
-    })
-    child.stderr?.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
-
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      child.on('error', reject)
-      child.on('close', (code) => resolve(code ?? 1))
-    })
-
-    if (exitCode !== 0) {
-      throw new Error(stderr.trim() || stdout.trim() || 'The Rust engine failed to process the selected images.')
-    }
-
-    const normalized = stdout.trim() || outputDir
-    const outputFiles = (await fs.promises.readdir(outputDir))
-      .filter((file) => /\.jpe?g$/i.test(file))
-      .sort((left, right) => {
-        const leftIndex = Number(left.match(/_(\d+)\.jpe?g$/i)?.[1] ?? 0)
-        const rightIndex = Number(right.match(/_(\d+)\.jpe?g$/i)?.[1] ?? 0)
-        return leftIndex - rightIndex
-      })
-      .map((file) => path.join(outputDir, file))
-    return {
-      ok: true,
-      outputDir: normalized,
-      files: outputFiles,
-      message: `Rust processing completed: ${normalized}`,
-    }
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Unknown error'
-    return {
-      ok: false,
-      error: detail,
-    }
-  }
-})
 function sendMenuAction(action: string, payload?: unknown) {
   win?.webContents.send('menu-action', action, payload)
 }
@@ -535,7 +420,6 @@ function buildAppMenu() {
         { label: 'Recover Autosave', click: () => sendMenuAction('recover') },
         { type: 'separator' },
         { label: 'Export…', click: () => sendMenuAction('export') },
-        { label: 'Process (Rust)', click: () => sendMenuAction('process') },
         { type: 'separator' },
         { role: 'quit' },
       ],

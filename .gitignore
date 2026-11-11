@@ -4,5 +4,4 @@ dist-electron/
 .DS_Store
 *.log
 release/
-rust/target/
 dist-electron/
