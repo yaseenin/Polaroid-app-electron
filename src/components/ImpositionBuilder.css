@@ -1,0 +1,547 @@
+.imposition-app {
+  --imposition-bg: #171b20;
+  --imposition-panel: #20262d;
+  --imposition-border: #343d46;
+  --imposition-text: #e3eaf0;
+  --imposition-muted: #93a0ad;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--imposition-bg);
+  color: var(--imposition-text);
+  font: 13px Arial, Helvetica, sans-serif;
+}
+
+.imposition-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 14px;
+  background: #222931;
+  border-bottom: 1px solid var(--imposition-border);
+}
+
+.imposition-brand,
+.imposition-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.imposition-brand {
+  white-space: nowrap;
+}
+
+.imposition-brand-mark {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 5px;
+  background: #38a8f5;
+  color: #071018;
+  font-weight: 700;
+}
+
+.imposition-toolbar button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #46515c;
+  border-radius: 4px;
+  background: #2a323a;
+  color: var(--imposition-text);
+}
+
+.imposition-toolbar button:hover {
+  background: #37434e;
+}
+
+.imposition-toolbar .imposition-close {
+  border-color: #347dad;
+}
+
+.imposition-toolbar-separator {
+  width: 1px;
+  height: 24px;
+  margin: 0 4px;
+  background: var(--imposition-border);
+}
+
+.imposition-zoom-value {
+  min-width: 44px;
+  color: var(--imposition-muted);
+  text-align: center;
+}
+
+.imposition-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 260px;
+  min-height: 0;
+}
+
+.imposition-library,
+.imposition-properties {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  background: var(--imposition-panel);
+}
+
+.imposition-library {
+  border-right: 1px solid var(--imposition-border);
+}
+
+.imposition-properties {
+  border-left: 1px solid var(--imposition-border);
+}
+
+.imposition-library section {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--imposition-border);
+}
+
+.imposition-library h2,
+.imposition-properties h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.imposition-empty {
+  color: var(--imposition-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.imposition-layer-row,
+.imposition-sheet-entry {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: #29323a;
+}
+
+.imposition-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.imposition-section-heading h2 {
+  margin-bottom: 12px;
+}
+
+.imposition-section-heading button,
+.imposition-layer-row button {
+  border: 0;
+  background: transparent;
+  color: var(--imposition-muted);
+}
+
+.imposition-artwork-entry,
+.imposition-object-entry {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0;
+  padding: 5px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: #29323a;
+  color: var(--imposition-text);
+  text-align: left;
+}
+
+.imposition-artwork-entry:hover,
+.imposition-object-entry:hover,
+.imposition-object-entry.active {
+  border-color: #3b91c5;
+  background: #303e48;
+}
+
+.imposition-artwork-entry img {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  background: #101418;
+}
+
+.imposition-artwork-entry span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imposition-artwork-entry b {
+  color: #58b4ef;
+}
+
+.imposition-object-entry {
+  display: block;
+  padding: 7px;
+  font-size: 11px;
+}
+
+.imposition-shape-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.imposition-shape-tools button,
+.imposition-property-actions button,
+.imposition-align-actions button {
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid #46515b;
+  border-radius: 4px;
+  background: #29323a;
+  color: var(--imposition-text);
+  font-size: 11px;
+}
+
+.imposition-shape-tools button:hover,
+.imposition-property-actions button:hover,
+.imposition-align-actions button:hover:not(:disabled) {
+  background: #374650;
+}
+
+.imposition-layer-row {
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+
+.imposition-layer-row span {
+  flex: 1;
+}
+
+.imposition-object {
+  cursor: move;
+  touch-action: none;
+}
+
+.imposition-object.locked {
+  cursor: not-allowed;
+}
+
+.imposition-resize-handle {
+  fill: #fff;
+  stroke: #087bc1;
+  stroke-width: 0.6;
+  cursor: nwse-resize;
+  pointer-events: all;
+}
+
+.imposition-selection {
+  stroke-dasharray: 3 1;
+}
+
+.imposition-cut-mark {
+  fill: none;
+  pointer-events: none;
+}
+
+.imposition-property-actions,
+.imposition-align-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin: 10px 0;
+}
+
+.imposition-property-actions .danger {
+  border-color: #965050;
+  color: #ff9a92;
+}
+
+.imposition-align-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.imposition-properties .imposition-checkbox {
+  display: flex;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.imposition-checkbox input {
+  width: auto;
+  height: auto;
+  accent-color: #38a8f5;
+}
+
+.imposition-sheet-entry {
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+  border: 1px solid transparent;
+  background: #29323a;
+  color: var(--imposition-text);
+  text-align: left;
+}
+
+.imposition-sheet-entry.active {
+  border: 1px solid #3888bb;
+}
+
+.imposition-sheet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.imposition-sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.imposition-sheet-actions button {
+  min-width: 26px;
+  height: 23px;
+  border: 1px solid #46515b;
+  border-radius: 3px;
+  background: #252d35;
+  color: var(--imposition-muted);
+}
+
+.imposition-sheet-actions button:disabled {
+  opacity: 0.4;
+}
+
+.imposition-workspace {
+  display: grid;
+  grid-template-rows: 24px minmax(0, 1fr) 24px;
+  min-width: 0;
+  min-height: 0;
+  background-color: #15191e;
+  background-image: radial-gradient(#303840 0.7px, transparent 0.7px);
+  background-size: 14px 14px;
+}
+
+.imposition-ruler {
+  overflow: hidden;
+  color: #a6b0ba;
+  background: #242a31;
+  font-size: 10px;
+}
+
+.imposition-ruler-top {
+  position: relative;
+  justify-self: center;
+  margin-top: 6px;
+  border-top: 1px solid #76818a;
+}
+
+.imposition-ruler-top span {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+}
+
+.imposition-ruler-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-top: 1px solid var(--imposition-border);
+}
+
+.imposition-canvas-area {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 32px;
+}
+
+.imposition-sheet-wrap {
+  flex: 0 0 auto;
+  box-shadow: 0 8px 28px #0009;
+}
+
+.imposition-sheet {
+  display: block;
+  overflow: visible;
+  border: 1px solid #0b0d0f;
+  background: white;
+}
+
+.imposition-properties > label,
+.imposition-properties fieldset {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  color: #c4cdd5;
+  font-size: 12px;
+}
+
+.imposition-properties fieldset > label {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 5px;
+}
+
+.imposition-run-layout {
+  grid-column: 1 / -1;
+  min-height: 30px;
+  border: 1px solid #347dad;
+  border-radius: 4px;
+  background: #263d4c;
+  color: var(--imposition-text);
+}
+
+.imposition-modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #080b0ecf;
+}
+
+.imposition-preflight {
+  width: min(680px, 100%);
+  max-height: min(80vh, 760px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid #47515c;
+  border-radius: 8px;
+  background: #222931;
+  box-shadow: 0 15px 50px #000b;
+}
+
+.imposition-preflight h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.imposition-preflight > p {
+  color: var(--imposition-muted);
+}
+
+.imposition-preflight ul {
+  display: grid;
+  gap: 8px;
+  max-height: 48vh;
+  overflow: auto;
+  padding: 0;
+  list-style: none;
+}
+
+.imposition-preflight li {
+  padding: 9px 10px;
+  border-left: 3px solid #64717c;
+  background: #171d23;
+  line-height: 1.4;
+}
+
+.imposition-preflight li strong {
+  margin-right: 5px;
+}
+
+.imposition-preflight .severity-error {
+  border-color: #ef625b;
+}
+
+.imposition-preflight .severity-warning {
+  border-color: #e8ad50;
+}
+
+.imposition-preflight .severity-info {
+  border-color: #45a5db;
+}
+
+.imposition-preflight .preflight-pass {
+  color: #8ed3a1;
+}
+
+.imposition-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.imposition-modal-actions button {
+  min-height: 34px;
+  padding: 5px 12px;
+  border: 1px solid #46515b;
+  border-radius: 4px;
+  background: #29323a;
+  color: var(--imposition-text);
+}
+
+.imposition-modal-actions .primary {
+  border-color: #307fb1;
+  background: #266d9c;
+}
+
+.imposition-properties input,
+.imposition-properties select {
+  width: 100%;
+  height: 31px;
+  padding: 0 8px;
+  border: 1px solid #46515b;
+  border-radius: 4px;
+  background: #171c21;
+  color: var(--imposition-text);
+}
+
+.imposition-properties fieldset {
+  grid-template-columns: 1fr 1fr;
+  padding: 8px;
+  border: 1px solid var(--imposition-border);
+}
+
+.imposition-properties legend {
+  padding: 0 4px;
+}
+
+.imposition-margin-field {
+  display: grid;
+  gap: 4px;
+  text-transform: capitalize;
+}
+
+.imposition-dimensions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.imposition-dimensions label {
+  display: grid;
+  gap: 6px;
+  color: #c4cdd5;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .imposition-body {
+    grid-template-columns: 170px minmax(0, 1fr) 220px;
+  }
+
+  .imposition-toolbar {
+    overflow-x: auto;
+  }
+}

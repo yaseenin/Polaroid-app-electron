@@ -35,6 +35,7 @@ type ExportDialogProps = {
   buildCard: BuildCard
   onClose: () => void
   onSave: () => void
+  onPrint: () => void
   onPreviewError: (message: string) => void
 }
 
@@ -62,6 +63,7 @@ export function ExportDialog({
   buildCard,
   onClose,
   onSave,
+  onPrint,
   onPreviewError,
 }: ExportDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -115,9 +117,9 @@ export function ExportDialog({
   }, [])
 
   const maxImagesPerPage = useMemo(() => {
-    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, orientation)
     return layout.cols * layout.rows
-  }, [preset, paperSize])
+  }, [preset, paperSize, orientation])
 
   const totalPages = Math.max(1, Math.ceil(photos.length / maxImagesPerPage))
   const currentPage = Math.min(previewPage, totalPages - 1)
@@ -130,7 +132,7 @@ export function ExportDialog({
 
     const render = async () => {
       try {
-        const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+        const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, orientation)
         const startIndex = currentPage * maxImagesPerPage
         const pagePhotos = photos.slice(startIndex, startIndex + maxImagesPerPage)
 
@@ -255,8 +257,8 @@ export function ExportDialog({
       <div className="export-dialog" onClick={(event) => event.stopPropagation()}>
         <div className="export-dialog-header">
           <div>
-            <h3>Export preview</h3>
-            <p>Print layout, pages, orientation, and sizing</p>
+            <h3>Print / export preview</h3>
+            <p>Preview the layout before printing or exporting</p>
           </div>
           <button type="button" title="Close export dialog" className="close-dialog" onClick={onClose}>×</button>
         </div>
@@ -416,6 +418,7 @@ export function ExportDialog({
 
         <div className="export-dialog-actions">
           <button type="button" title="Cancel export" className="ghost-button" onClick={onClose}>Cancel</button>
+          <button type="button" title="Open print preview and printer options" className="ghost-button" onClick={onPrint}>Print…</button>
           <button type="button" title="Save export" className="action-button" onClick={onSave}>Save export</button>
         </div>
       </div>

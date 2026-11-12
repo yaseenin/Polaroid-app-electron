@@ -67,8 +67,10 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
     pdfPages?: Array<{
       width: number
       height: number
-      images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number }>
-      lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }>
+      images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number; rotationDeg?: number }>
+      lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number; color?: string; dashArray?: number[] }>
+      vectors?: Array<{ path: string; fill: string | null; stroke: string | null; strokeWidth: number; dashArray?: number[] }>
+      text?: Array<{ text: string; x: number; y: number; fontSize: number; color: string; rotationDeg: number; centerX: number; centerY: number }>
     }>
   }) =>
     ipcRenderer.invoke('save-export', payload) as Promise<{
@@ -77,4 +79,38 @@ contextBridge.exposeInMainWorld('polaroidEngine', {
       filePath?: string
       error?: string
     }>,
+  openPrintPreview: (payload: {
+    pages: Array<{
+      width: number
+      height: number
+      images: Array<{ buffer: ArrayBuffer; x: number; y: number; width: number; height: number; rotationDeg?: number }>
+      lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number; color?: string; dashArray?: number[] }>
+      vectors?: Array<{ path: string; fill: string | null; stroke: string | null; strokeWidth: number; dashArray?: number[] }>
+      text?: Array<{ text: string; x: number; y: number; fontSize: number; color: string; rotationDeg: number; centerX: number; centerY: number }>
+    }>
+    dpi: number
+  }) => ipcRenderer.invoke('open-print-preview', payload) as Promise<{
+    ok: boolean
+    error?: string
+  }>,
+  listPrinters: () => ipcRenderer.invoke('list-printers') as Promise<{
+    printers: Array<{ name: string; displayName: string; isDefault: boolean }>
+    error?: string
+  }>,
+  getPrinterPaperSizes: (printerName: string) => ipcRenderer.invoke('get-printer-paper-sizes', printerName) as Promise<{
+    paperSizes: Array<{ name: string; width: number; height: number }>
+    error?: string
+  }>,
+  printPreviewPage: (options: {
+    printerName: string
+    paperWidth: number
+    paperHeight: number
+    copies: number
+    color: boolean
+    duplexMode: 'simplex' | 'shortEdge' | 'longEdge'
+  }) => ipcRenderer.invoke('print-preview-page', options) as Promise<{
+    ok: boolean
+    error?: string
+  }>,
+  closePrintPreview: () => ipcRenderer.invoke('close-print-preview') as Promise<void>,
 })

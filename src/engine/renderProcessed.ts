@@ -52,21 +52,29 @@ class WorkerChannel {
       worker.onmessage = (event: MessageEvent<{ buffer: ArrayBuffer }>) => {
         const job = this.current
         this.current = null
-        job?.resolve(event.data.buffer)
+        if (job) {
+          try {
+            const buffer = event.data?.buffer
+            if (!(buffer instanceof ArrayBuffer)) {
+              throw new Error('Worker returned invalid data.')
+            }
+            job.resolve(buffer)
+          } catch (err) {
+            job.reject(err instanceof Error ? err : new Error('Worker returned invalid data.'))
+          }
+        }
         this.pump()
       }
       worker.onerror = () => {
-        // Fall back gracefully to in-thread processing if worker crashes or fails
+        // The job's buffer was transferred to the worker and is now detached,
+        // so it cannot be reused here. Reject the job and let the caller fall
+        // back using fresh image data read from the canvas. Mark the channel
+        // failed so later jobs run in-thread instead of hanging on a dead worker.
+        this.failed = true
         const job = this.current
         this.current = null
         if (job) {
-          try {
-            const pixels = new Uint8ClampedArray(job.buffer)
-            applyProcessingToPixels(pixels, job.width, job.height, job.settings)
-            job.resolve(job.buffer)
-          } catch (err) {
-            job.reject(err instanceof Error ? err : new Error('Processing failed'))
-          }
+          job.reject(new Error('Worker failed during processing.'))
         }
         this.pump()
       }
@@ -181,9 +189,13 @@ export async function renderProcessedImageAsync(
     return canvas
   } catch (err) {
     if (isSuperseded(err)) throw err
-    // If worker fails, process in-place on context
-    applyProcessingToPixels(imageData.data, width, height, settings)
-    context.putImageData(imageData, 0, 0)
+    // `imageData.data` may be backed by a buffer that was transferred to a
+    // failed worker and detached, so it cannot be reused. Re-read the pixels
+    // from the canvas (which still holds the unprocessed image) for the
+    // in-thread fallback.
+    const fallback = context.getImageData(0, 0, width, height)
+    applyProcessingToPixels(fallback.data, width, height, settings)
+    context.putImageData(fallback, 0, 0)
     return canvas
   }
 }

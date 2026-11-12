@@ -14,6 +14,7 @@ import {
 import { isSuperseded, renderProcessedImageAsync } from './engine/renderProcessed'
 
 import { ExportDialog } from './components/ExportDialog'
+import { ImpositionBuilder } from './components/ImpositionBuilder'
 import { SliderControl } from './components/SliderControl'
 
 import { useAutosave } from './hooks/useAutosave'
@@ -21,7 +22,7 @@ import { useCrop } from './hooks/useCrop'
 import { useProject, type RestoredProject } from './hooks/useProject'
 import { useZoomPan } from './hooks/useZoomPan'
 
-import { getBridge, toAppFileUrl } from './lib/bridge'
+import { getBridge, getFolderOf, toAppFileUrl, type SheetPagePayload } from './lib/bridge'
 import {
   clamp,
   createBlurFillCanvas,
@@ -42,6 +43,13 @@ import {
   type SliderKey,
 } from './lib/editorConstants'
 import { analyzeForPrint } from './lib/printAnalysis'
+import { readImpositionAutosave, writeImpositionAutosave } from './lib/autosaveStore'
+import {
+  createNewImpositionDocument,
+  parseImpositionDocument,
+  resolveSheetDimensionsMm,
+  type ImpositionDocument,
+} from './lib/impositionDocument'
 
 import type {
   BuildCard,
@@ -59,6 +67,60 @@ async function canvasToBytes(canvas: HTMLCanvasElement, mime: string, quality: n
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, quality))
   if (!blob) throw new Error('Unable to encode the export sheet.')
   return blob.arrayBuffer()
+}
+
+async function buildSheetPages(
+  images: HTMLCanvasElement[],
+  presetKey: PresetKey,
+  paperSize: PaperSizeKey,
+  offset: { offsetX: number; offsetY: number },
+  pageCapacity: number,
+  orientation: ExportOrientation,
+): Promise<SheetPagePayload[]> {
+  const preset = PRESETS[presetKey]
+  const pages: SheetPagePayload[] = []
+
+  for (let start = 0; start < images.length; start += pageCapacity) {
+    const pageImages = images.slice(start, start + pageCapacity)
+    const layout = buildSheetLayout(preset, pageImages.length, paperSize, offset, orientation)
+    const usedCols = Math.max(1, Math.ceil(pageImages.length / layout.rows))
+    const usedRows = usedCols > 1 ? layout.rows : Math.max(1, pageImages.length)
+    const gridW = usedCols * preset.frameW
+    const gridH = usedRows * preset.frameH
+    const placedImages = await Promise.all(
+      pageImages.map(async (image, index) => {
+        const col = Math.floor(index / layout.rows)
+        const row = index % layout.rows
+        return {
+          buffer: await canvasToBytes(image, 'image/jpeg', 0.95),
+          x: layout.marginX + col * preset.frameW + preset.offsetX,
+          y: layout.marginY + row * preset.frameH + preset.offsetY,
+          width: preset.photoW,
+          height: preset.photoH,
+        }
+      }),
+    )
+    const lines: SheetPagePayload['lines'] = []
+
+    for (let mark = 0; mark <= usedCols; mark += 1) {
+      const x = layout.marginX + mark * preset.frameW
+      lines.push(
+        { x1: x, y1: layout.marginY - layout.markLength, x2: x, y2: layout.marginY, width: 2 },
+        { x1: x, y1: layout.marginY + gridH, x2: x, y2: layout.marginY + gridH + layout.markLength, width: 2 },
+      )
+    }
+    for (let mark = 0; mark <= usedRows; mark += 1) {
+      const y = layout.marginY + mark * preset.frameH
+      lines.push(
+        { x1: layout.marginX - layout.markLength, y1: y, x2: layout.marginX, y2: y, width: 2 },
+        { x1: layout.marginX + gridW, y1: y, x2: layout.marginX + gridW + layout.markLength, y2: y, width: 2 },
+      )
+    }
+
+    pages.push({ width: layout.sheetW, height: layout.sheetH, images: placedImages, lines })
+  }
+
+  return pages
 }
 
 function App() {
@@ -79,8 +141,6 @@ function App() {
   const [preset, setPreset] = useState<PresetKey>('mini')
   const [paperSize, setPaperSize] = useState<PaperSizeKey>('13x19')
   const [exportFormat, setExportFormat] = useState<ExportFormat>('pdf')
-  // NOTE: page count and orientation are stored in projects and shown in the preview,
-  // but the sheet engine (buildSheetLayout / renderSheet) does not take them yet.
   const [exportPageCount, setExportPageCount] = useState(1)
   const [exportOrientation, setExportOrientation] = useState<ExportOrientation>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
@@ -89,6 +149,8 @@ function App() {
   const [exportGridOffsetY, setExportGridOffsetY] = useState(0)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [exportPreviewPage, setExportPreviewPage] = useState(0)
+  const [impositionDocument, setImpositionDocument] = useState<ImpositionDocument | null>(null)
+  const [showImpositionBuilder, setShowImpositionBuilder] = useState(false)
 
   /* ---- Editor UI state ---- */
   const [showOriginalPreview, setShowOriginalPreview] = useState(false)
@@ -409,7 +471,98 @@ function App() {
   }
 
   const handleImpositionBuilder = () => {
-    setStatus('Imposition Builder coming soon')
+    setImpositionDocument((current) => current ?? createNewImpositionDocument())
+    setShowImpositionBuilder(true)
+  }
+
+  const handlePlacePhotoOnImposition = async (photo: Photo, sheetId: string) => {
+    try {
+      const image = await loadImageResource(photo.url)
+      const sourcePath = photo.url.startsWith('data:') ? null : getFolderOf(photo.path) ? photo.path : null
+      let dataUrl: string | null = photo.url.startsWith('data:') ? photo.url : null
+      if (!sourcePath && !dataUrl) {
+        const response = await fetch(photo.url)
+        if (!response.ok) throw new Error(`Unable to read ${photo.name}.`)
+        const blob = await response.blob()
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result))
+          reader.onerror = () => reject(reader.error ?? new Error(`Unable to read ${photo.name}.`))
+          reader.readAsDataURL(blob)
+        })
+      }
+
+      const assetId = crypto.randomUUID()
+      const designId = crypto.randomUUID()
+      const objectId = crypto.randomUUID()
+      setImpositionDocument((current) => {
+        if (!current) return current
+        const sheet = current.sheets.find((item) => item.id === sheetId)
+        if (!sheet) throw new Error('The selected imposition sheet no longer exists.')
+        const sheetDimensions = resolveSheetDimensionsMm(sheet)
+        const availableWidth = Math.max(10, sheetDimensions.widthMm - sheet.marginsMm.left - sheet.marginsMm.right)
+        const availableHeight = Math.max(10, sheetDimensions.heightMm - sheet.marginsMm.top - sheet.marginsMm.bottom)
+        const widthMm = Math.min(60, availableWidth)
+        const heightMm = Math.min(widthMm * image.naturalHeight / image.naturalWidth, availableHeight)
+        const actualWidthMm = Math.min(widthMm, heightMm * image.naturalWidth / image.naturalHeight)
+        const index = current.designs.length
+        const columns = Math.max(1, Math.floor(availableWidth / (actualWidthMm + sheet.layout.horizontalGapMm)))
+        const xMm = sheet.marginsMm.left + (index % columns) * (actualWidthMm + sheet.layout.horizontalGapMm)
+        const yMm = sheet.marginsMm.top + Math.floor(index / columns) * (heightMm + sheet.layout.verticalGapMm)
+        const layer = sheet.layers.find((item) => !item.locked) ?? sheet.layers[0]
+        if (!layer) throw new Error('Add an unlocked layer before placing artwork.')
+        const crop = cropAppliedByPhoto[photo.id] ?? null
+        const asset = {
+          id: assetId,
+          name: photo.name,
+          mimeType: photo.url.startsWith('data:') ? photo.url.slice(5, photo.url.indexOf(';')) : 'image/*',
+          sourcePath,
+          dataUrl,
+          widthPx: image.naturalWidth,
+          heightPx: image.naturalHeight,
+        }
+        const design = {
+          id: designId,
+          name: photo.name,
+          assetId,
+          widthMm: actualWidthMm,
+          heightMm,
+          quantity: 1,
+          allowRotation: true,
+          settings: settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS,
+          crop: crop ? { ...crop } : null,
+        }
+        const object = {
+          id: objectId,
+          layerId: layer.id,
+          name: photo.name,
+          type: 'image' as const,
+          designId,
+          fit: 'contain' as const,
+          flipX: false,
+          flipY: false,
+          xMm,
+          yMm,
+          widthMm: actualWidthMm,
+          heightMm,
+          rotationDeg: 0,
+          scaleX: 1,
+          scaleY: 1,
+          locked: false,
+          visible: true,
+        }
+        return {
+          ...current,
+          assets: [...current.assets, asset],
+          designs: [...current.designs, design],
+          sheets: current.sheets.map((item) => (
+            item.id === sheet.id ? { ...item, objects: [...item.objects, object] } : item
+          )),
+        }
+      })
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to place artwork.')
+    }
   }
 
   const handleRemoveAllImages = () => {
@@ -507,6 +660,34 @@ function App() {
     openProject: handleOpenProject,
     setStatus,
   })
+
+  useEffect(() => {
+    if (!impositionDocument) return
+    const timer = window.setTimeout(() => {
+      void writeImpositionAutosave({ savedAt: Date.now(), document: impositionDocument }).catch((error) => {
+        setStatus(`Imposition autosave failed: ${error instanceof Error ? error.message : 'unknown error'}`)
+      })
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [impositionDocument])
+
+  const handleRecoverAutosave = useCallback(async () => {
+    try {
+      const record = await readImpositionAutosave()
+      if (record?.document) {
+        const recoveredDocument = parseImpositionDocument(record.document)
+        if (!window.confirm(`Recover imposition autosave from ${new Date(record.savedAt).toLocaleString()}?`)) return
+        setImpositionDocument(recoveredDocument)
+        setShowImpositionBuilder(true)
+        setStatus('Recovered imposition autosave.')
+        return
+      }
+    } catch (error) {
+      setStatus(`Unable to recover imposition autosave: ${error instanceof Error ? error.message : 'unknown error'}`)
+      return
+    }
+    void recoverAutosave()
+  }, [recoverAutosave, setStatus])
 
   useEffect(() => {
     markDirty()
@@ -715,7 +896,7 @@ function App() {
         images.push(await buildCard(photo, photoW, photoH, { preview: false }))
       }
 
-      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize)
+      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation)
       const maxImagesPerPage = layout.cols * layout.rows
       // PDF pages use JPEG: embedding is a straight copy (PNG must be decoded) and the file stays far smaller.
       const mime = exportFormat === 'png' ? 'image/png' : exportFormat === 'webp' ? 'image/webp' : 'image/jpeg'
@@ -723,56 +904,10 @@ function App() {
       const bridge = getBridge()
 
       if (exportFormat === 'pdf' && bridge?.saveExport) {
-        const presetDefinition = PRESETS[preset]
-        const pdfPages = []
-
-        for (let i = 0; i < images.length; i += maxImagesPerPage) {
-          const pageImages = images.slice(i, i + maxImagesPerPage)
-          const pageLayout = buildSheetLayout(presetDefinition, pageImages.length, paperSize, {
-            offsetX: exportGridOffsetX,
-            offsetY: exportGridOffsetY,
-          })
-          const usedCols = Math.max(1, Math.ceil(pageImages.length / pageLayout.rows))
-          const usedRows = usedCols > 1 ? pageLayout.rows : Math.max(1, pageImages.length)
-          const gridW = usedCols * presetDefinition.frameW
-          const gridH = usedRows * presetDefinition.frameH
-          const pageImagesForPdf = await Promise.all(
-            pageImages.map(async (image, index) => {
-              const col = Math.floor(index / pageLayout.rows)
-              const row = index % pageLayout.rows
-              return {
-                buffer: await canvasToBytes(image, 'image/jpeg', 0.95),
-                x: pageLayout.marginX + col * presetDefinition.frameW + presetDefinition.offsetX,
-                y: pageLayout.marginY + row * presetDefinition.frameH + presetDefinition.offsetY,
-                width: presetDefinition.photoW,
-                height: presetDefinition.photoH,
-              }
-            }),
-          )
-          const lines: Array<{ x1: number; y1: number; x2: number; y2: number; width: number }> = []
-
-          for (let mark = 0; mark <= usedCols; mark += 1) {
-            const x = pageLayout.marginX + mark * presetDefinition.frameW
-            lines.push(
-              { x1: x, y1: pageLayout.marginY - pageLayout.markLength, x2: x, y2: pageLayout.marginY, width: 2 },
-              { x1: x, y1: pageLayout.marginY + gridH, x2: x, y2: pageLayout.marginY + gridH + pageLayout.markLength, width: 2 },
-            )
-          }
-          for (let mark = 0; mark <= usedRows; mark += 1) {
-            const y = pageLayout.marginY + mark * presetDefinition.frameH
-            lines.push(
-              { x1: pageLayout.marginX - pageLayout.markLength, y1: y, x2: pageLayout.marginX, y2: y, width: 2 },
-              { x1: pageLayout.marginX + gridW, y1: y, x2: pageLayout.marginX + gridW + pageLayout.markLength, y2: y, width: 2 },
-            )
-          }
-
-          pdfPages.push({
-            width: pageLayout.sheetW,
-            height: pageLayout.sheetH,
-            images: pageImagesForPdf,
-            lines,
-          })
-        }
+        const pdfPages = await buildSheetPages(images, preset, paperSize, {
+          offsetX: exportGridOffsetX,
+          offsetY: exportGridOffsetY,
+        }, maxImagesPerPage, exportOrientation)
 
         const result = await bridge.saveExport({
           mime: 'image/jpeg',
@@ -799,7 +934,7 @@ function App() {
         const sheet = await renderSheet(images.slice(i, i + maxImagesPerPage), preset, NEUTRAL_SETTINGS, paperSize, exportAutoRotate, {
           offsetX: exportGridOffsetX,
           offsetY: exportGridOffsetY,
-        })
+        }, exportOrientation)
         buffers.push(await canvasToBytes(sheet, mime, 0.95))
       }
 
@@ -842,6 +977,44 @@ function App() {
     }
   }
 
+  const handlePrintSheet = async () => {
+    if (photos.length === 0) {
+      setStatus('Select at least one photo before printing.')
+      return
+    }
+
+    const bridge = getBridge()
+    if (!bridge?.openPrintPreview) {
+      setStatus('Printing is available in the desktop app.')
+      return
+    }
+
+    setProcessing(true)
+    setStatus('Preparing print preview…')
+
+    try {
+      const { photoW, photoH } = PRESETS[preset]
+      const images: HTMLCanvasElement[] = []
+      for (const photo of photos) {
+        images.push(await buildCard(photo, photoW, photoH, { preview: false }))
+      }
+
+      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation)
+      const pages = await buildSheetPages(images, preset, paperSize, {
+        offsetX: exportGridOffsetX,
+        offsetY: exportGridOffsetY,
+      }, layout.cols * layout.rows, exportOrientation)
+      const result = await bridge.openPrintPreview({ pages, dpi: 300 })
+      if (!result.ok) throw new Error(result.error ?? 'Unable to open print preview.')
+
+      setStatus('Print preview opened. Choose Print to select a printer and print options.')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to prepare print preview.')
+    } finally {
+      setProcessing(false)
+    }
+  }
+
   const openExportDialog = () => {
     if (photos.length === 0) {
       setStatus('Select at least one photo before exporting.')
@@ -875,6 +1048,15 @@ function App() {
     if (mod && key === 'o' && !showExportDialog) {
       event.preventDefault()
       void handleOpenProject()
+      return
+    }
+
+    if (mod && key === 'p') {
+      event.preventDefault()
+      if (!isTyping) {
+        if (showExportDialog) void handlePrintSheet()
+        else openExportDialog()
+      }
       return
     }
 
@@ -956,9 +1138,10 @@ function App() {
         void handleSaveProject()
         break
       case 'recover':
-        void recoverAutosave()
+        void handleRecoverAutosave()
         break
       case 'export':
+      case 'print-preview':
         openExportDialog()
         break
       case 'undo':
@@ -989,7 +1172,20 @@ function App() {
   const operationSummary = buildAdjustmentOperations(activeSettings)
   const stageLabel = activePhoto ? `${photos.length} photo${photos.length === 1 ? '' : 's'} | ${activePhoto.name}` : ''
 
-  return (
+  return showImpositionBuilder && impositionDocument ? (
+    <ImpositionBuilder
+      document={impositionDocument}
+      onDocumentChange={setImpositionDocument}
+      photos={photos}
+      onAddPhoto={handlePlacePhotoOnImposition}
+      onNew={() => {
+        if (window.confirm('Start a new imposition? Unsaved changes in this document will be lost.')) {
+          setImpositionDocument(createNewImpositionDocument())
+        }
+      }}
+      onClose={() => setShowImpositionBuilder(false)}
+    />
+  ) : (
     <div className="app dark">
       <input
         ref={fileInputRef}
@@ -1288,6 +1484,7 @@ function App() {
           buildCard={buildCard}
           onClose={() => setShowExportDialog(false)}
           onSave={finalizeExport}
+          onPrint={() => void handlePrintSheet()}
           onPreviewError={setStatus}
         />
       ) : null}

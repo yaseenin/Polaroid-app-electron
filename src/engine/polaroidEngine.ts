@@ -1,3 +1,5 @@
+import type { ExportOrientation } from '../types'
+
 export type PresetKey = 'mini' | 'instax-max' | 'polaroid-600'
 export type PaperSizeKey = 'A4' | '13x19' | '13x9.5'
 
@@ -159,6 +161,7 @@ export function buildSheetLayout(
   imageCount: number,
   paperSize: PaperSizeKey = 'A4',
   offset: GridOffset = { offsetX: 0, offsetY: 0 },
+  orientation?: ExportOrientation,
 ): {
   cols: number
   rows: number
@@ -179,33 +182,50 @@ export function buildSheetLayout(
   const presetKey = `${paperSize}:${preset.key}`
   let cols = Math.max(1, Math.ceil(Math.sqrt(imageCount)))
   let rows = Math.max(1, Math.ceil(imageCount / cols))
-  let sheetW = baseW
-  let sheetH = baseH
+  const paperW = orientation
+    ? orientation === 'portrait' ? Math.min(baseW, baseH) : Math.max(baseW, baseH)
+    : baseW
+  const paperH = orientation
+    ? orientation === 'portrait' ? Math.max(baseW, baseH) : Math.min(baseW, baseH)
+    : baseH
+  const layoutW = orientation ? Math.max(1, paperW - 80) : paperW
+  const layoutH = orientation ? Math.max(1, paperH - 80) : paperH
+  let sheetW = paperW
+  let sheetH = paperH
 
   const presetMatch = gridPresets[presetKey]
   if (presetMatch) {
     const [presetCols, presetRows, forceLandscape] = presetMatch
-    cols = presetCols
-    rows = presetRows
-    if (forceLandscape) {
-      sheetW = baseH
-      sheetH = baseW
+    const presetGridW = presetCols * preset.frameW
+    const presetGridH = presetRows * preset.frameH
+    if (orientation && (presetGridW > layoutW || presetGridH > layoutH)) {
+      cols = Math.max(1, Math.floor(layoutW / preset.frameW))
+      rows = Math.max(1, Math.floor(layoutH / preset.frameH))
     } else {
-      sheetW = baseW
-      sheetH = baseH
+      cols = presetCols
+      rows = presetRows
+    }
+    if (!orientation) {
+      if (forceLandscape) {
+        sheetW = baseH
+        sheetH = baseW
+      } else {
+        sheetW = baseW
+        sheetH = baseH
+      }
     }
   } else {
-    const colsBySize = Math.max(1, Math.floor(baseW / preset.frameW))
-    const rowsBySize = Math.max(1, Math.floor(baseH / preset.frameH))
+    const colsBySize = Math.max(1, Math.floor(layoutW / preset.frameW))
+    const rowsBySize = Math.max(1, Math.floor(layoutH / preset.frameH))
     const gridW = colsBySize * preset.frameW
     const gridH = rowsBySize * preset.frameH
 
-    if (gridW <= baseW && gridH <= baseH) {
-      sheetW = baseW
-      sheetH = baseH
+    if (gridW <= layoutW && gridH <= layoutH) {
+      sheetW = paperW
+      sheetH = paperH
       cols = colsBySize
       rows = rowsBySize
-    } else {
+    } else if (!orientation) {
       sheetW = baseH
       sheetH = baseW
       cols = Math.max(1, Math.floor(sheetW / preset.frameW))
@@ -215,8 +235,13 @@ export function buildSheetLayout(
 
   const gridW = cols * preset.frameW
   const gridH = rows * preset.frameH
-  const resolvedSheetW = Math.max(sheetW, gridW + 80)
-  const resolvedSheetH = Math.max(sheetH, gridH + 80)
+  let resolvedSheetW = Math.max(sheetW, gridW + 80)
+  let resolvedSheetH = Math.max(sheetH, gridH + 80)
+  if (orientation === 'portrait' && resolvedSheetW >= resolvedSheetH) {
+    resolvedSheetH = resolvedSheetW + 1
+  } else if (orientation === 'landscape' && resolvedSheetH >= resolvedSheetW) {
+    resolvedSheetW = resolvedSheetH + 1
+  }
   const markLength = 40
 
   return {
@@ -633,9 +658,10 @@ export async function renderSheet(
   paperSize: PaperSizeKey = 'A4',
   autoRotate = false,
   offset: GridOffset = { offsetX: 0, offsetY: 0 },
+  orientation?: ExportOrientation,
 ): Promise<HTMLCanvasElement> {
   const preset = PRESETS[presetKey]
-  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize, offset)
+  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize, offset, orientation)
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = Math.round(layout.sheetW)
   sheetCanvas.height = Math.round(layout.sheetH)
