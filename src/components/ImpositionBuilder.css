@@ -16,6 +16,7 @@
 
 .imposition-toolbar {
   display: flex;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -32,7 +33,23 @@
 }
 
 .imposition-brand {
+  flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.imposition-toolbar-actions {
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-start;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.imposition-toolbar-group {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
 }
 
 .imposition-brand-mark {
@@ -47,20 +64,37 @@
 }
 
 .imposition-toolbar button {
+  flex: 0 0 auto;
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid #46515c;
   border-radius: 4px;
   background: #2a323a;
   color: var(--imposition-text);
+  white-space: nowrap;
 }
 
 .imposition-toolbar button:hover {
   background: #37434e;
 }
 
+.imposition-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.imposition-toolbar .imposition-toolbar-primary {
+  border-color: #347dad;
+  background: #245a7c;
+}
+
+.imposition-toolbar .imposition-toolbar-primary:hover:not(:disabled) {
+  background: #2b719d;
+}
+
 .imposition-toolbar .imposition-close {
   border-color: #347dad;
+  margin-left: auto;
 }
 
 .imposition-toolbar-separator {
@@ -72,13 +106,14 @@
 
 .imposition-zoom-value {
   min-width: 44px;
+  flex: 0 0 auto;
   color: var(--imposition-muted);
   text-align: center;
 }
 
 .imposition-body {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 260px;
+  grid-template-columns: 230px minmax(0, 1fr) 300px;
   min-height: 0;
 }
 
@@ -86,8 +121,10 @@
 .imposition-properties {
   min-height: 0;
   overflow: auto;
-  padding: 14px;
+  padding: 14px 12px;
   background: var(--imposition-panel);
+  scrollbar-width: thin;
+  scrollbar-color: #46515b transparent;
 }
 
 .imposition-library {
@@ -106,11 +143,27 @@
 
 .imposition-library h2,
 .imposition-properties h2 {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   font-size: 13px;
 }
 
+.imposition-properties > h2 {
+  position: sticky;
+  z-index: 2;
+  top: -14px;
+  padding: 8px 0 4px;
+  background: var(--imposition-panel);
+}
+
+.imposition-help-text {
+  margin: 0 0 10px;
+  color: var(--imposition-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .imposition-empty {
+  margin: 8px 0 0;
   color: var(--imposition-muted);
   font-size: 12px;
   line-height: 1.5;
@@ -130,11 +183,40 @@
 .imposition-section-heading {
   display: flex;
   align-items: center;
+  gap: 7px;
   justify-content: space-between;
 }
 
 .imposition-section-heading h2 {
+  flex: 1;
   margin-bottom: 12px;
+}
+
+.imposition-count,
+.imposition-summary-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid #3b4650;
+  border-radius: 999px;
+  color: var(--imposition-muted);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.imposition-summary-meta {
+  min-width: auto;
+  min-height: 20px;
+  font-weight: 400;
+}
+
+.imposition-summary-meta.is-on {
+  border-color: #356a51;
+  background: #20372b;
+  color: #9cdbb1;
 }
 
 .imposition-section-heading button,
@@ -274,8 +356,8 @@
 
 .imposition-properties .imposition-checkbox {
   display: flex;
-  grid-template-columns: auto 1fr;
   align-items: center;
+  gap: 8px;
 }
 
 .imposition-checkbox input {
@@ -393,6 +475,67 @@
   font-size: 12px;
 }
 
+.imposition-settings-group {
+  margin: 0 0 10px;
+  border: 1px solid var(--imposition-border);
+  border-radius: 6px;
+  background: #1b2127;
+}
+
+.imposition-settings-group > summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 7px 9px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.imposition-settings-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.imposition-settings-group > summary::before {
+  content: '›';
+  color: #7c8994;
+  font-size: 17px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.imposition-settings-group[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.imposition-settings-group > summary > span:first-of-type {
+  flex: 1;
+}
+
+.imposition-settings-group > summary:hover {
+  background: #242d35;
+}
+
+.imposition-settings-group > .imposition-help-text {
+  padding: 0 10px;
+}
+
+.imposition-settings-content {
+  display: grid;
+  gap: 9px;
+  padding: 0 10px 11px;
+}
+
+.imposition-properties details > .imposition-settings-content > label {
+  display: grid;
+  gap: 5px;
+  color: #c4cdd5;
+  font-size: 12px;
+}
+
 .imposition-properties fieldset > label {
   display: grid;
   grid-column: 1 / -1;
@@ -401,11 +544,22 @@
 
 .imposition-run-layout {
   grid-column: 1 / -1;
-  min-height: 30px;
+  min-height: 36px;
   border: 1px solid #347dad;
-  border-radius: 4px;
-  background: #263d4c;
+  border-radius: 5px;
+  background: #245a7c;
   color: var(--imposition-text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.imposition-run-layout:hover:not(:disabled) {
+  background: #2b719d;
+}
+
+.imposition-run-layout:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .imposition-modal-backdrop {
@@ -498,18 +652,42 @@
 .imposition-properties input,
 .imposition-properties select {
   width: 100%;
-  height: 31px;
-  padding: 0 8px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
   border: 1px solid #46515b;
   border-radius: 4px;
   background: #171c21;
   color: var(--imposition-text);
 }
 
+.imposition-properties .imposition-checkbox input {
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+}
+
+.imposition-properties input:focus-visible,
+.imposition-properties select:focus-visible,
+.imposition-properties button:focus-visible,
+.imposition-toolbar button:focus-visible,
+.imposition-library button:focus-visible {
+  outline: 2px solid #54b7f2;
+  outline-offset: 2px;
+}
+
+.imposition-properties input:disabled,
+.imposition-properties select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .imposition-properties fieldset {
   grid-template-columns: 1fr 1fr;
-  padding: 8px;
+  padding: 10px;
   border: 1px solid var(--imposition-border);
+  border-radius: 5px;
+  background: #1b2127;
 }
 
 .imposition-properties legend {
@@ -536,12 +714,69 @@
   font-size: 11px;
 }
 
+.imposition-inspector-subheading {
+  display: grid;
+  gap: 3px;
+  margin: 14px 0 7px;
+  color: #cbd4dc;
+  font-size: 11px;
+}
+
+.imposition-inspector-subheading span {
+  color: var(--imposition-muted);
+  font-weight: 400;
+  line-height: 1.4;
+}
+
 @media (max-width: 900px) {
   .imposition-body {
-    grid-template-columns: 170px minmax(0, 1fr) 220px;
+    grid-template-columns: 180px minmax(0, 1fr) 250px;
   }
 
   .imposition-toolbar {
     overflow-x: auto;
+  }
+
+  .imposition-toolbar-actions {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  .imposition-app {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .imposition-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .imposition-toolbar-actions {
+    width: 100%;
+  }
+
+  .imposition-body {
+    grid-template-columns: minmax(145px, 30%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 38vh);
+  }
+
+  .imposition-library {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .imposition-workspace {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .imposition-properties {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    border-top: 1px solid var(--imposition-border);
+    border-left: 0;
   }
 }

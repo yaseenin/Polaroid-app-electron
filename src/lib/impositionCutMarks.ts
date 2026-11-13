@@ -13,6 +13,7 @@ export type CutMarkLine = {
 
 type Point = { x: number; y: number }
 type Bounds = { x: number; y: number; width: number; height: number }
+type SharedEdge = { segment: [Point, Point]; firstEdge: number; secondEdge: number }
 
 function objectCorners(object: ImpositionSheet['objects'][number], expansion = 0): Point[] {
   const width = object.widthMm * object.scaleX + expansion * 2
@@ -44,29 +45,158 @@ function getBounds(corners: Point[]): Bounds {
   }
 }
 
+function getSharedEdge(
+  firstCorners: Point[],
+  secondCorners: Point[],
+  maxGapMm: number,
+): SharedEdge | null {
+  const tolerance = 0.05
+  for (let firstIndex = 0; firstIndex < firstCorners.length; firstIndex += 1) {
+    const firstStart = firstCorners[firstIndex]
+    const firstEnd = firstCorners[(firstIndex + 1) % firstCorners.length]
+    const dx = firstEnd.x - firstStart.x
+    const dy = firstEnd.y - firstStart.y
+    const length = Math.hypot(dx, dy)
+    if (length <= tolerance) continue
+    const axis = { x: dx / length, y: dy / length }
+
+    for (let secondIndex = 0; secondIndex < secondCorners.length; secondIndex += 1) {
+      const secondStart = secondCorners[secondIndex]
+      const secondEnd = secondCorners[(secondIndex + 1) % secondCorners.length]
+      const otherDx = secondEnd.x - secondStart.x
+      const otherDy = secondEnd.y - secondStart.y
+      const otherLength = Math.hypot(otherDx, otherDy)
+      if (otherLength <= tolerance || Math.abs(axis.x * otherDy - axis.y * otherDx) / otherLength > 0.001) continue
+      const signedDistance = axis.x * (secondStart.y - firstStart.y) - axis.y * (secondStart.x - firstStart.x)
+      if (Math.abs(signedDistance) > maxGapMm + tolerance) continue
+
+      const project = (point: Point) => (point.x - firstStart.x) * axis.x + (point.y - firstStart.y) * axis.y
+      const overlapStart = Math.max(0, Math.min(project(secondStart), project(secondEnd)))
+      const overlapEnd = Math.min(length, Math.max(project(secondStart), project(secondEnd)))
+      if (overlapEnd - overlapStart <= tolerance) continue
+      const offsetX = -axis.y * signedDistance / 2
+      const offsetY = axis.x * signedDistance / 2
+      return {
+        segment: [
+          { x: firstStart.x + axis.x * overlapStart + offsetX, y: firstStart.y + axis.y * overlapStart + offsetY },
+          { x: firstStart.x + axis.x * overlapEnd + offsetX, y: firstStart.y + axis.y * overlapEnd + offsetY },
+        ],
+        firstEdge: firstIndex,
+        secondEdge: secondIndex,
+      }
+    }
+  }
+  return null
+}
+
 export function getCutMarkLines(sheet: ImpositionSheet, forExport = false): CutMarkLine[] {
   const marks = sheet.cutMarks
-  if (!marks.enabled || (!forExport && !marks.showInWorkspace)) return []
+  const edgeToEdge = sheet.layout.mode === 'edge-to-edge'
+  if (!marks.enabled || (!edgeToEdge && marks.lineWidthMm <= 0) || (!forExport && !marks.showInWorkspace)) return []
   const dashArray = marks.style === 'dashed' ? `${marks.lengthMm / 3} ${marks.lengthMm / 4}`
     : marks.style === 'dotted' ? `${marks.lineWidthMm} ${marks.lineWidthMm * 2}`
       : undefined
   const lines: CutMarkLine[] = []
-  const addLine = (a: Point, b: Point, kind: string) => {
+  const addLine = (
+    a: Point,
+    b: Point,
+    kind: string,
+    style?: { color?: string; dashArray?: string | null; widthMm?: number },
+  ) => {
     lines.push({
       x1: a.x,
       y1: a.y,
       x2: b.x,
       y2: b.y,
-      widthMm: marks.lineWidthMm,
-      color: marks.color,
-      dashArray,
+      widthMm: style?.widthMm ?? marks.lineWidthMm,
+      color: style?.color ?? marks.color,
+      dashArray: style?.dashArray === null ? undefined : style?.dashArray ?? dashArray,
       kind,
     })
   }
   const visibleObjects = sheet.objects.filter((object) => object.visible && sheet.layers.some((layer) => layer.id === object.layerId && layer.visible))
+  if (edgeToEdge) {
+    const imageBounds = visibleObjects
+      .filter((object) => object.type === 'image')
+      .map((object) => getBounds(objectCorners(object)))
+    if (!imageBounds.length) return []
+
+    const minX = Math.min(...imageBounds.map((box) => box.x))
+    const maxX = Math.max(...imageBounds.map((box) => box.x + box.width))
+    const minY = Math.min(...imageBounds.map((box) => box.y))
+    const maxY = Math.max(...imageBounds.map((box) => box.y + box.height))
+    const uniqueSorted = (values: number[]) => values.sort((a, b) => a - b).filter((value, index, sorted) => (
+      index === 0 || Math.abs(value - sorted[index - 1]) > 0.05
+    ))
+    const columnBoundaries = uniqueSorted(imageBounds.flatMap((box) => [box.x, box.x + box.width]))
+    const rowBoundaries = uniqueSorted(imageBounds.flatMap((box) => [box.y, box.y + box.height]))
+    const tickStyle = { color: '#000000', dashArray: null, widthMm: 0.15 }
+    const tickLengthMm = 4
+    const artworkOffsetMm = 2
+
+    for (const x of columnBoundaries) {
+      addLine(
+        { x, y: minY - artworkOffsetMm - tickLengthMm },
+        { x, y: minY - artworkOffsetMm },
+        'edge-to-edge-tick',
+        tickStyle,
+      )
+      addLine(
+        { x, y: maxY + artworkOffsetMm },
+        { x, y: maxY + artworkOffsetMm + tickLengthMm },
+        'edge-to-edge-tick',
+        tickStyle,
+      )
+    }
+    for (const y of rowBoundaries) {
+      addLine(
+        { x: minX - artworkOffsetMm - tickLengthMm, y },
+        { x: minX - artworkOffsetMm, y },
+        'edge-to-edge-tick',
+        tickStyle,
+      )
+      addLine(
+        { x: maxX + artworkOffsetMm, y },
+        { x: maxX + artworkOffsetMm + tickLengthMm, y },
+        'edge-to-edge-tick',
+        tickStyle,
+      )
+    }
+    return lines
+  }
+
   const objectCornersList = visibleObjects.map((object) => objectCorners(object))
   const bounds = objectCornersList.map(getBounds)
-  const shouldDrawCropMarks = marks.cornerCropMarks || marks.trimMarks
+  const sharedEdgesByObject = objectCornersList.map(() => new Set<number>())
+  const sharedCutLines: Array<[Point, Point]> = []
+  if (marks.sharedCutLines) {
+    const sharedGap = Math.max(0, marks.spacingMm)
+      + Math.max(0, sheet.layout.horizontalGapMm, sheet.layout.verticalGapMm)
+    for (let first = 0; first < objectCornersList.length; first += 1) {
+      for (let second = first + 1; second < objectCornersList.length; second += 1) {
+        const a = bounds[first]
+        const b = bounds[second]
+        const tolerance = 0.05
+        const gapX = a.x + a.width <= b.x ? b.x - (a.x + a.width)
+          : b.x + b.width <= a.x ? a.x - (b.x + b.width) : null
+        const gapY = a.y + a.height <= b.y ? b.y - (a.y + a.height)
+          : b.y + b.height <= a.y ? a.y - (b.y + b.height) : null
+        const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+        const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+        const neighboring = (
+          gapX !== null && gapX <= sharedGap + tolerance && overlapY > tolerance
+        ) || (
+          gapY !== null && gapY <= sharedGap + tolerance && overlapX > tolerance
+        )
+        if (!neighboring) continue
+        const sharedEdge = getSharedEdge(objectCornersList[first], objectCornersList[second], sharedGap)
+        if (!sharedEdge) continue
+        sharedEdgesByObject[first].add(sharedEdge.firstEdge)
+        sharedEdgesByObject[second].add(sharedEdge.secondEdge)
+        sharedCutLines.push(sharedEdge.segment)
+      }
+    }
+  }
 
   if (marks.objectOutlines) {
     for (const corners of objectCornersList) {
@@ -85,30 +215,29 @@ export function getCutMarkLines(sheet: ImpositionSheet, forExport = false): CutM
     }
   }
 
-  if (shouldDrawCropMarks) {
+  if (marks.cornerCropMarks || marks.trimMarks) {
     const gap = Math.max(0, marks.offsetMm + marks.distanceFromArtworkMm)
     const length = Math.max(0, marks.lengthMm)
-    for (let objectIndex = 0; objectIndex < visibleObjects.length; objectIndex += 1) {
-      const corners = objectCornersList[objectIndex]
-      const object = visibleObjects[objectIndex]
-      const radians = object.rotationDeg * Math.PI / 180
-      const axisX = { x: Math.cos(radians), y: Math.sin(radians) }
-      const axisY = { x: -Math.sin(radians), y: Math.cos(radians) }
+    for (const [objectIndex, corners] of objectCornersList.entries()) {
       corners.forEach((point, index) => {
-        const horizontalSign = index === 0 || index === 3 ? -1 : 1
-        const verticalSign = index < 2 ? -1 : 1
-        const horizontalOffset = { x: axisY.x * verticalSign * gap, y: axisY.y * verticalSign * gap }
-        const verticalOffset = { x: axisX.x * horizontalSign * gap, y: axisX.y * horizontalSign * gap }
-        addLine(
-          { x: point.x + horizontalOffset.x, y: point.y + horizontalOffset.y },
-          { x: point.x + horizontalOffset.x + axisX.x * horizontalSign * length, y: point.y + horizontalOffset.y + axisX.y * horizontalSign * length },
-          'crop-mark',
-        )
-        addLine(
-          { x: point.x + verticalOffset.x, y: point.y + verticalOffset.y },
-          { x: point.x + verticalOffset.x + axisY.x * verticalSign * length, y: point.y + verticalOffset.y + axisY.y * verticalSign * length },
-          'crop-mark',
-        )
+        const adjacentEdges = [
+          { adjacent: corners[(index + 1) % corners.length], edgeIndex: index },
+          { adjacent: corners[(index + corners.length - 1) % corners.length], edgeIndex: (index + corners.length - 1) % corners.length },
+        ]
+        for (const { adjacent, edgeIndex } of adjacentEdges) {
+          if (sharedEdgesByObject[objectIndex].has(edgeIndex)) continue
+          const dx = point.x - adjacent.x
+          const dy = point.y - adjacent.y
+          const edgeLength = Math.hypot(dx, dy)
+          if (!edgeLength) continue
+          const direction = { x: dx / edgeLength, y: dy / edgeLength }
+          addLine(
+            { x: point.x + direction.x * gap, y: point.y + direction.y * gap },
+            { x: point.x + direction.x * (gap + length), y: point.y + direction.y * (gap + length) },
+            'crop-mark',
+            { color: '#ed1c24', dashArray: null },
+          )
+        }
       })
     }
   }
@@ -132,6 +261,10 @@ export function getCutMarkLines(sheet: ImpositionSheet, forExport = false): CutM
 
   if (marks.horizontalCutGuides || marks.verticalCutGuides || marks.sharedCutLines) {
     const tolerance = 0.05
+    const axisAlignedObjects = visibleObjects.map((object) => {
+      const radians = object.rotationDeg * Math.PI / 180
+      return Math.abs(Math.sin(radians)) <= 0.001 || Math.abs(Math.cos(radians)) <= 0.001
+    })
     for (let first = 0; first < bounds.length; first += 1) {
       for (let second = first + 1; second < bounds.length; second += 1) {
         const a = bounds[first]
@@ -140,24 +273,37 @@ export function getCutMarkLines(sheet: ImpositionSheet, forExport = false): CutM
         const overlapXEnd = Math.min(a.x + a.width, b.x + b.width)
         const overlapYStart = Math.max(a.y, b.y)
         const overlapYEnd = Math.min(a.y + a.height, b.y + b.height)
-        if (marks.sharedCutLines && Math.abs(a.x + a.width - b.x) <= tolerance && overlapYEnd > overlapYStart) {
-          addLine({ x: b.x, y: overlapYStart }, { x: b.x, y: overlapYEnd }, 'shared-cut')
-        } else if (marks.sharedCutLines && Math.abs(b.x + b.width - a.x) <= tolerance && overlapYEnd > overlapYStart) {
-          addLine({ x: a.x, y: overlapYStart }, { x: a.x, y: overlapYEnd }, 'shared-cut')
-        } else if (marks.sharedCutLines && Math.abs(a.y + a.height - b.y) <= tolerance && overlapXEnd > overlapXStart) {
-          addLine({ x: overlapXStart, y: b.y }, { x: overlapXEnd, y: b.y }, 'shared-cut')
-        } else if (marks.sharedCutLines && Math.abs(b.y + b.height - a.y) <= tolerance && overlapXEnd > overlapXStart) {
-          addLine({ x: overlapXStart, y: a.y }, { x: overlapXEnd, y: a.y }, 'shared-cut')
-        } else if (marks.verticalCutGuides && overlapYEnd > overlapYStart && (Math.abs(a.x + a.width - b.x) < 20 || Math.abs(b.x + b.width - a.x) < 20)) {
-          const x = (a.x + a.width <= b.x ? a.x + a.width + b.x : b.x + b.width + a.x) / 2
+        if (!axisAlignedObjects[first] || !axisAlignedObjects[second]) continue
+
+        const verticalGap = a.x + a.width <= b.x
+          ? b.x - (a.x + a.width)
+          : b.x + b.width <= a.x ? a.x - (b.x + b.width) : -1
+        const horizontalGap = a.y + a.height <= b.y
+          ? b.y - (a.y + a.height)
+          : b.y + b.height <= a.y ? a.y - (b.y + b.height) : -1
+        if (
+          marks.verticalCutGuides
+          && overlapYEnd - overlapYStart > tolerance
+          && verticalGap > tolerance
+          && verticalGap <= Math.max(0, marks.spacingMm) + Math.max(0, sheet.layout.horizontalGapMm) + tolerance
+        ) {
+          const x = a.x + a.width <= b.x ? a.x + a.width + verticalGap / 2 : b.x + b.width + verticalGap / 2
           addLine({ x, y: overlapYStart }, { x, y: overlapYEnd }, 'vertical-cut-guide')
-        } else if (marks.horizontalCutGuides && overlapXEnd > overlapXStart && (Math.abs(a.y + a.height - b.y) < 20 || Math.abs(b.y + b.height - a.y) < 20)) {
-          const y = (a.y + a.height <= b.y ? a.y + a.height + b.y : b.y + b.height + a.y) / 2
+        }
+        if (
+          marks.horizontalCutGuides
+          && overlapXEnd - overlapXStart > tolerance
+          && horizontalGap > tolerance
+          && horizontalGap <= Math.max(0, marks.spacingMm) + Math.max(0, sheet.layout.verticalGapMm) + tolerance
+        ) {
+          const y = a.y + a.height <= b.y ? a.y + a.height + horizontalGap / 2 : b.y + b.height + horizontalGap / 2
           addLine({ x: overlapXStart, y }, { x: overlapXEnd, y }, 'horizontal-cut-guide')
         }
       }
     }
   }
+
+  for (const segment of sharedCutLines) addLine(segment[0], segment[1], 'shared-cut')
 
   if (marks.customGuides) {
     for (const guide of sheet.guides) {

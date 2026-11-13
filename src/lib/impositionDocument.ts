@@ -6,7 +6,7 @@ export const IMPOSITION_DOCUMENT_VERSION = 1
 
 export type ImpositionUnits = 'mm' | 'cm' | 'in'
 export type ImpositionPaperKey = PaperSizeKey | 'A3' | 'A5' | 'custom'
-export type ImpositionLayoutMode = 'manual' | 'grid' | 'step-repeat' | 'best-fit'
+export type ImpositionLayoutMode = 'edge-to-edge' | 'manual' | 'grid' | 'step-repeat' | 'best-fit'
 export type CutMarkStyle = 'solid' | 'dashed' | 'dotted'
 
 export type ImpositionAsset = {
@@ -199,7 +199,7 @@ export function createNewImpositionDocument(name = 'Untitled imposition'): Impos
           enabled: true,
           showInWorkspace: true,
           cornerCropMarks: true,
-          trimMarks: true,
+          trimMarks: false,
           registrationMarks: false,
           horizontalCutGuides: false,
           verticalCutGuides: false,
@@ -210,9 +210,9 @@ export function createNewImpositionDocument(name = 'Untitled imposition'): Impos
           customGuides: true,
           lineWidthMm: 0.25,
           lengthMm: 3,
-          offsetMm: 2,
-          spacingMm: 3,
-          distanceFromArtworkMm: 2,
+          offsetMm: 0,
+          spacingMm: 0,
+          distanceFromArtworkMm: 0,
           color: '#000000',
           style: 'solid',
         },
@@ -437,13 +437,13 @@ export function parseImpositionDocument(input: unknown): ImpositionDocument {
       'horizontalCutGuides', 'verticalCutGuides', 'crossMarks', 'bleedBoundary',
       'objectOutlines', 'sharedCutLines', 'customGuides',
     ]) requireBoolean(raw.cutMarks[key], `${path}.cutMarks.${key}`)
-    requireFinite(raw.cutMarks.lineWidthMm, `${path}.cutMarks.lineWidthMm`, 0.001)
+    requireFinite(raw.cutMarks.lineWidthMm, `${path}.cutMarks.lineWidthMm`, 0)
     for (const key of ['lengthMm', 'offsetMm', 'spacingMm', 'distanceFromArtworkMm']) requireFinite(raw.cutMarks[key], `${path}.cutMarks.${key}`, 0)
     requireColor(raw.cutMarks.color, `${path}.cutMarks.color`)
     if (!['solid', 'dashed', 'dotted'].includes(String(raw.cutMarks.style))) {
       throw new Error(`Invalid imposition project: ${path}.cutMarks.style is unsupported.`)
     }
-    if (!['manual', 'grid', 'step-repeat', 'best-fit'].includes(String(raw.layout.mode))) {
+    if (!['edge-to-edge', 'manual', 'grid', 'step-repeat', 'best-fit'].includes(String(raw.layout.mode))) {
       throw new Error(`Invalid imposition project: ${path}.layout.mode is unsupported.`)
     }
     for (const key of ['horizontalGapMm', 'verticalGapMm']) requireFinite(raw.layout[key], `${path}.layout.${key}`, 0)

@@ -11,7 +11,17 @@ export type AutomaticLayoutResult = {
   sourceSheetId: string
   sheetsUsed: number
   placedCopies: number
+  requestedCopies: number
+  utilizationPercent: number
+  designQuantities: Array<{ designId: string; name: string; requested: number; placed: number }>
   unplacedDesignNames: string[]
+}
+
+type FreeRectangle = {
+  xMm: number
+  yMm: number
+  widthMm: number
+  heightMm: number
 }
 
 type Placement = {
@@ -27,19 +37,18 @@ type PageState = {
   cursorX: number
   cursorY: number
   rowHeight: number
-  imageAreaMm2: number
+  freeRectangles: FreeRectangle[]
 }
 
 function getReserveMm(sheet: ImpositionSheet): number {
   const marks = sheet.cutMarks
-  const hasMarks = marks.enabled && (
+  const hasMarks = marks.enabled && marks.lineWidthMm > 0 && (
     marks.cornerCropMarks
     || marks.trimMarks
     || marks.registrationMarks
     || marks.horizontalCutGuides
     || marks.verticalCutGuides
     || marks.crossMarks
-    || marks.objectOutlines
     || marks.sharedCutLines
   )
   const markReserve = hasMarks
@@ -90,8 +99,8 @@ function findPlacement(page: PageState, design: ImpositionDesign, sheet: Imposit
   const maxX = dimensions.widthMm - sheet.marginsMm.right
   const maxY = dimensions.heightMm - sheet.marginsMm.bottom
   const reserveMm = getReserveMm(sheet)
-  const gapX = Math.max(0, sheet.layout.horizontalGapMm, sheet.cutMarks.spacingMm)
-  const gapY = Math.max(0, sheet.layout.verticalGapMm, sheet.cutMarks.spacingMm)
+  const gapX = Math.max(0, sheet.layout.horizontalGapMm) + Math.max(0, sheet.cutMarks.spacingMm)
+  const gapY = Math.max(0, sheet.layout.verticalGapMm) + Math.max(0, sheet.cutMarks.spacingMm)
   const rowY = page.cursorY
   const candidates = getOrientations(design, sheet.layout.allowRotation, reserveMm)
     .map((item) => {
@@ -137,13 +146,100 @@ function findPlacement(page: PageState, design: ImpositionDesign, sheet: Imposit
   }
 }
 
+function splitFreeRectangles(page: PageState, used: FreeRectangle): void {
+  const nextRectangles: FreeRectangle[] = []
+  for (const free of page.freeRectangles) {
+    const freeRight = free.xMm + free.widthMm
+    const freeBottom = free.yMm + free.heightMm
+    const usedRight = used.xMm + used.widthMm
+    const usedBottom = used.yMm + used.heightMm
+    if (used.xMm >= freeRight || usedRight <= free.xMm || used.yMm >= freeBottom || usedBottom <= free.yMm) {
+      nextRectangles.push(free)
+      continue
+    }
+
+    if (used.yMm > free.yMm && used.yMm < freeBottom) {
+      nextRectangles.push({ ...free, heightMm: used.yMm - free.yMm })
+    }
+    if (usedBottom < freeBottom && usedBottom > free.yMm) {
+      nextRectangles.push({ ...free, yMm: usedBottom, heightMm: freeBottom - usedBottom })
+    }
+    if (used.xMm > free.xMm && used.xMm < freeRight) {
+      const top = Math.max(free.yMm, used.yMm)
+      const bottom = Math.min(freeBottom, usedBottom)
+      if (bottom > top) nextRectangles.push({ xMm: free.xMm, yMm: top, widthMm: used.xMm - free.xMm, heightMm: bottom - top })
+    }
+    if (usedRight < freeRight && usedRight > free.xMm) {
+      const top = Math.max(free.yMm, used.yMm)
+      const bottom = Math.min(freeBottom, usedBottom)
+      if (bottom > top) nextRectangles.push({ xMm: usedRight, yMm: top, widthMm: freeRight - usedRight, heightMm: bottom - top })
+    }
+  }
+
+  page.freeRectangles = nextRectangles.filter((rectangle, index) => !nextRectangles.some((other, otherIndex) => {
+    if (index === otherIndex) return false
+    const contained = rectangle.xMm >= other.xMm
+      && rectangle.yMm >= other.yMm
+      && rectangle.xMm + rectangle.widthMm <= other.xMm + other.widthMm
+      && rectangle.yMm + rectangle.heightMm <= other.yMm + other.heightMm
+    const equal = rectangle.xMm === other.xMm
+      && rectangle.yMm === other.yMm
+      && rectangle.widthMm === other.widthMm
+      && rectangle.heightMm === other.heightMm
+    return contained && (!equal || otherIndex < index)
+  }))
+}
+
+function findBestFitPlacement(page: PageState, design: ImpositionDesign, sheet: ImpositionSheet): Placement | null {
+  const reserveMm = getReserveMm(sheet)
+  const gapX = Math.max(0, sheet.layout.horizontalGapMm) + Math.max(0, sheet.cutMarks.spacingMm)
+  const gapY = Math.max(0, sheet.layout.verticalGapMm) + Math.max(0, sheet.cutMarks.spacingMm)
+  const candidates = page.freeRectangles.flatMap((free) => getOrientations(design, sheet.layout.allowRotation, reserveMm)
+    .filter((orientation) => orientation.widthMm <= free.widthMm && orientation.heightMm <= free.heightMm)
+    .map((orientation) => {
+      const remainingWidth = free.widthMm - orientation.widthMm
+      const remainingHeight = free.heightMm - orientation.heightMm
+      return {
+        free,
+        orientation,
+        shortSideFit: Math.min(remainingWidth, remainingHeight),
+        longSideFit: Math.max(remainingWidth, remainingHeight),
+        areaFit: free.widthMm * free.heightMm - orientation.widthMm * orientation.heightMm,
+      }
+    }))
+  candidates.sort((a, b) => a.shortSideFit - b.shortSideFit
+    || a.longSideFit - b.longSideFit
+    || a.areaFit - b.areaFit
+    || a.orientation.rotationDeg - b.orientation.rotationDeg)
+  const chosen = candidates[0]
+  if (!chosen) return null
+
+  splitFreeRectangles(page, {
+    xMm: chosen.free.xMm,
+    yMm: chosen.free.yMm,
+    widthMm: Math.min(chosen.free.widthMm, chosen.orientation.widthMm + gapX),
+    heightMm: Math.min(chosen.free.heightMm, chosen.orientation.heightMm + gapY),
+  })
+  return {
+    ...chosen.orientation,
+    xMm: chosen.free.xMm,
+    yMm: chosen.free.yMm,
+  }
+}
+
 function createPageState(sheet: ImpositionSheet): PageState {
+  const dimensions = resolveSheetDimensionsMm(sheet)
   return {
     sheet,
     cursorX: sheet.marginsMm.left,
     cursorY: sheet.marginsMm.top,
     rowHeight: 0,
-    imageAreaMm2: 0,
+    freeRectangles: [{
+      xMm: sheet.marginsMm.left,
+      yMm: sheet.marginsMm.top,
+      widthMm: Math.max(0, dimensions.widthMm - sheet.marginsMm.left - sheet.marginsMm.right),
+      heightMm: Math.max(0, dimensions.heightMm - sheet.marginsMm.top - sheet.marginsMm.bottom),
+    }],
   }
 }
 
@@ -200,6 +296,9 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
   const outputSheets: ImpositionSheet[] = [baseSheet]
   let page = createPageState(baseSheet)
   let placedCopies = 0
+  let requestedCopies = document.designs.reduce((sum, design) => sum + Math.max(0, Math.floor(design.quantity)), 0)
+  const placedByDesign = new Map(document.designs.map((design) => [design.id, 0]))
+  const requestedByDesign = new Map(document.designs.map((design) => [design.id, Math.max(0, Math.floor(design.quantity))]))
   const unplacedDesignNames: string[] = []
   const designs = document.designs
     .filter((design) => design.quantity > 0)
@@ -207,18 +306,27 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
   if (sourceSheet.layout.mode === 'best-fit') {
     designs.sort((a, b) => b.widthMm * b.heightMm - a.widthMm * a.heightMm)
   }
+  const findLayoutPlacement = (currentPage: PageState, design: ImpositionDesign, currentSheet: ImpositionSheet) => (
+    sourceSheet.layout.mode === 'best-fit'
+      ? findBestFitPlacement(currentPage, design, currentSheet)
+      : findPlacement(currentPage, design, currentSheet)
+  )
   const placeOnShelf = (design: ImpositionDesign) => {
-    let placement = findPlacement(page, design, page.sheet)
+    if (!page.sheet.layers.some((layer) => !layer.locked)) {
+      unplacedDesignNames.push(design.name)
+      return
+    }
+    let placement = findLayoutPlacement(page, design, page.sheet)
     if (!placement) {
       const trial = createPageState(baseSheet)
-      if (!findPlacement(trial, design, baseSheet)) {
+      if (!findLayoutPlacement(trial, design, baseSheet)) {
         unplacedDesignNames.push(design.name)
         return
       }
       const nextSheet = cloneEmptySheet(sourceSheet, outputSheets.length + 1, sourceSheetId)
       outputSheets.push(nextSheet)
       page = createPageState(nextSheet)
-      placement = findPlacement(page, design, nextSheet)
+      placement = findLayoutPlacement(page, design, nextSheet)
     }
     if (!placement) {
       unplacedDesignNames.push(design.name)
@@ -230,11 +338,75 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
       return
     }
     page.sheet.objects.push(createImageObject(design, layerId, placement))
-    page.imageAreaMm2 += placement.widthMm * placement.heightMm
     placedCopies += 1
+    placedByDesign.set(design.id, (placedByDesign.get(design.id) ?? 0) + 1)
   }
 
-  if (sourceSheet.layout.mode === 'grid') {
+  if (sourceSheet.layout.mode === 'edge-to-edge') {
+    const dimensions = resolveSheetDimensionsMm(sourceSheet)
+    const availableWidth = Math.max(0, dimensions.widthMm - sourceSheet.marginsMm.left - sourceSheet.marginsMm.right)
+    const availableHeight = Math.max(0, dimensions.heightMm - sourceSheet.marginsMm.top - sourceSheet.marginsMm.bottom)
+    let edgeSheetCount = 0
+    requestedCopies = 0
+
+    for (const design of document.designs.filter((item) => item.quantity > 0)) {
+      const orientations: Array<Omit<Placement, 'xMm' | 'yMm'>> = [{
+        widthMm: design.widthMm,
+        heightMm: design.heightMm,
+        rotationDeg: 0,
+      }]
+      if (sourceSheet.layout.allowRotation && design.allowRotation && design.widthMm !== design.heightMm) {
+        orientations.push({
+          widthMm: design.heightMm,
+          heightMm: design.widthMm,
+          rotationDeg: 90,
+        })
+      }
+      const candidates = orientations.map((orientation) => {
+        const columns = Math.floor(availableWidth / orientation.widthMm)
+        const rows = Math.floor(availableHeight / orientation.heightMm)
+        return { ...orientation, columns, rows, capacity: columns * rows }
+      }).sort((a, b) => b.capacity - a.capacity || a.rotationDeg - b.rotationDeg)
+      const chosen = candidates[0]
+      if (!chosen || chosen.capacity === 0) {
+        requestedCopies += Math.max(0, Math.floor(design.quantity))
+        unplacedDesignNames.push(design.name)
+        continue
+      }
+
+      requestedByDesign.set(design.id, chosen.capacity)
+      requestedCopies += chosen.capacity
+      const layerId = sourceSheet.layers.find((layer) => !layer.locked)?.id
+      if (!layerId) {
+        unplacedDesignNames.push(design.name)
+        continue
+      }
+
+      const targetSheet = edgeSheetCount === 0
+        ? baseSheet
+        : cloneEmptySheet(sourceSheet, outputSheets.length + 1, sourceSheetId)
+      if (edgeSheetCount > 0) outputSheets.push(targetSheet)
+      edgeSheetCount += 1
+      page = createPageState(targetSheet)
+      const gridWidth = chosen.columns * chosen.widthMm
+      const gridHeight = chosen.rows * chosen.heightMm
+      const startX = sourceSheet.marginsMm.left + (availableWidth - gridWidth) / 2
+      const startY = sourceSheet.marginsMm.top + (availableHeight - gridHeight) / 2
+
+      for (let index = 0; index < chosen.capacity; index += 1) {
+        const placement: Placement = {
+          xMm: startX + (index % chosen.columns) * chosen.widthMm,
+          yMm: startY + Math.floor(index / chosen.columns) * chosen.heightMm,
+          widthMm: chosen.widthMm,
+          heightMm: chosen.heightMm,
+          rotationDeg: chosen.rotationDeg,
+        }
+        page.sheet.objects.push(createImageObject(design, layerId, placement))
+        placedCopies += 1
+        placedByDesign.set(design.id, (placedByDesign.get(design.id) ?? 0) + 1)
+      }
+    }
+  } else if (sourceSheet.layout.mode === 'grid') {
     const dimensions = resolveSheetDimensionsMm(sourceSheet)
     const availableWidth = dimensions.widthMm - sourceSheet.marginsMm.left - sourceSheet.marginsMm.right
     const availableHeight = dimensions.heightMm - sourceSheet.marginsMm.top - sourceSheet.marginsMm.bottom
@@ -247,8 +419,8 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
     }
     const cellWidth = Math.max(...[...gridOrientations.values()].map((item) => item.widthMm), 0)
     const cellHeight = Math.max(...[...gridOrientations.values()].map((item) => item.heightMm), 0)
-    const gapX = Math.max(0, sourceSheet.layout.horizontalGapMm, sourceSheet.cutMarks.spacingMm)
-    const gapY = Math.max(0, sourceSheet.layout.verticalGapMm, sourceSheet.cutMarks.spacingMm)
+    const gapX = Math.max(0, sourceSheet.layout.horizontalGapMm) + Math.max(0, sourceSheet.cutMarks.spacingMm)
+    const gapY = Math.max(0, sourceSheet.layout.verticalGapMm) + Math.max(0, sourceSheet.cutMarks.spacingMm)
     const columns = cellWidth > 0 ? Math.floor((availableWidth + gapX) / (cellWidth + gapX)) : 0
     const rows = cellHeight > 0 ? Math.floor((availableHeight + gapY) / (cellHeight + gapY)) : 0
     const capacity = columns * rows
@@ -282,6 +454,7 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
         }
         page.sheet.objects.push(createImageObject(design, layerId, placement))
         placedCopies += 1
+        placedByDesign.set(design.id, (placedByDesign.get(design.id) ?? 0) + 1)
       }
     }
     if (!capacity) {
@@ -296,11 +469,28 @@ export function createAutomaticLayout(document: ImpositionDocument, sheetId: str
     ...outputSheets,
     ...document.sheets.slice(sourceSheetIndex + 1).filter((sheet) => !shouldRemoveSheet(sheet)),
   ]
+  const placedArtworkAreaMm2 = document.designs.reduce((sum, design) => (
+    sum + design.widthMm * design.heightMm * (placedByDesign.get(design.id) ?? 0)
+  ), 0)
+  const printableAreaMm2 = outputSheets.reduce((sum, outputSheet) => {
+    const dimensions = resolveSheetDimensionsMm(outputSheet)
+    const printableWidth = Math.max(0, dimensions.widthMm - outputSheet.marginsMm.left - outputSheet.marginsMm.right)
+    const printableHeight = Math.max(0, dimensions.heightMm - outputSheet.marginsMm.top - outputSheet.marginsMm.bottom)
+    return sum + printableWidth * printableHeight
+  }, 0)
   return {
     document: { ...document, sheets },
     sourceSheetId,
     sheetsUsed: outputSheets.length,
     placedCopies,
+    requestedCopies,
+    utilizationPercent: printableAreaMm2 > 0 ? placedArtworkAreaMm2 / printableAreaMm2 * 100 : 0,
+    designQuantities: document.designs.map((design) => ({
+      designId: design.id,
+      name: design.name,
+      requested: requestedByDesign.get(design.id) ?? 0,
+      placed: placedByDesign.get(design.id) ?? 0,
+    })),
     unplacedDesignNames,
   }
 }

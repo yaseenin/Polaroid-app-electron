@@ -30,6 +30,7 @@ import {
   createFitCanvas,
   drawCropOverlay,
   getHistogram,
+  getCropRectPixels,
 } from './lib/canvasUtils'
 import {
   CROP_ASPECTS,
@@ -67,6 +68,18 @@ async function canvasToBytes(canvas: HTMLCanvasElement, mime: string, quality: n
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, quality))
   if (!blob) throw new Error('Unable to encode the export sheet.')
   return blob.arrayBuffer()
+}
+
+function getCroppedArtworkAspectRatio(widthPx: number, heightPx: number, crop: CropApplied | null): number {
+  const cropPixels = crop
+    ? getCropRectPixels(widthPx, heightPx, crop)
+    : { width: widthPx, height: heightPx, rotation: 0 }
+  const rotation = cropPixels.rotation * Math.PI / 180
+  const cosine = Math.abs(Math.cos(rotation))
+  const sine = Math.abs(Math.sin(rotation))
+  const rotatedWidth = cropPixels.width * cosine + cropPixels.height * sine
+  const rotatedHeight = cropPixels.width * sine + cropPixels.height * cosine
+  return rotatedWidth / Math.max(0.001, rotatedHeight)
 }
 
 async function buildSheetPages(
@@ -175,7 +188,7 @@ function App() {
   const recordHistoryRef = useRef<(full?: boolean) => void>(() => {})
 
   /* ---- Derived values ---- */
-  const activePhoto: Photo | undefined = photos[selectedPhotoIndex] ?? photos[0]
+  const activePhoto: Photo | undefined = selectedPhotoIndex >= 0 ? photos[selectedPhotoIndex] : undefined
   const activeSettings = activePhoto ? settingsByPhoto[activePhoto.id] ?? NEUTRAL_SETTINGS : NEUTRAL_SETTINGS
 
   const nextPhotoId = () => nextPhotoIdRef.current++
@@ -456,8 +469,8 @@ function App() {
   }
 
   const handleDeleteSelectedImage = () => {
-    if (photos.length === 0) return
-    const target = photos[selectedPhotoIndex] ?? photos[0]
+    const target = activePhoto
+    if (!target) return
     const id = target.id
     releasePhotos([target])
     setPhotos(photos.filter((photo) => photo.id !== id))
@@ -473,6 +486,11 @@ function App() {
   const handleImpositionBuilder = () => {
     setImpositionDocument((current) => current ?? createNewImpositionDocument())
     setShowImpositionBuilder(true)
+  }
+
+  const handleCloseImpositionBuilder = () => {
+    setSelectedPhotoIndex(-1)
+    setShowImpositionBuilder(false)
   }
 
   const handlePlacePhotoOnImposition = async (photo: Photo, sheetId: string) => {
@@ -502,16 +520,17 @@ function App() {
         const sheetDimensions = resolveSheetDimensionsMm(sheet)
         const availableWidth = Math.max(10, sheetDimensions.widthMm - sheet.marginsMm.left - sheet.marginsMm.right)
         const availableHeight = Math.max(10, sheetDimensions.heightMm - sheet.marginsMm.top - sheet.marginsMm.bottom)
+        const crop = cropAppliedByPhoto[photo.id] ?? null
+        const aspectRatio = getCroppedArtworkAspectRatio(image.naturalWidth, image.naturalHeight, crop)
         const widthMm = Math.min(60, availableWidth)
-        const heightMm = Math.min(widthMm * image.naturalHeight / image.naturalWidth, availableHeight)
-        const actualWidthMm = Math.min(widthMm, heightMm * image.naturalWidth / image.naturalHeight)
+        const heightMm = Math.min(widthMm / aspectRatio, availableHeight)
+        const actualWidthMm = Math.min(widthMm, heightMm * aspectRatio)
         const index = current.designs.length
         const columns = Math.max(1, Math.floor(availableWidth / (actualWidthMm + sheet.layout.horizontalGapMm)))
         const xMm = sheet.marginsMm.left + (index % columns) * (actualWidthMm + sheet.layout.horizontalGapMm)
         const yMm = sheet.marginsMm.top + Math.floor(index / columns) * (heightMm + sheet.layout.verticalGapMm)
         const layer = sheet.layers.find((item) => !item.locked) ?? sheet.layers[0]
         if (!layer) throw new Error('Add an unlocked layer before placing artwork.')
-        const crop = cropAppliedByPhoto[photo.id] ?? null
         const asset = {
           id: assetId,
           name: photo.name,
@@ -563,6 +582,73 @@ function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to place artwork.')
     }
+  }
+
+  const handlePrepareAllPhotosForImposition = async (
+    targetPhotos: Photo[],
+    sourceDocument: ImpositionDocument,
+    sheetId: string,
+  ): Promise<ImpositionDocument> => {
+    const sheet = sourceDocument.sheets.find((item) => item.id === sheetId)
+    if (!sheet) throw new Error('The selected imposition sheet no longer exists.')
+    const dimensions = resolveSheetDimensionsMm(sheet)
+    const availableWidth = Math.max(10, dimensions.widthMm - sheet.marginsMm.left - sheet.marginsMm.right)
+    const availableHeight = Math.max(10, dimensions.heightMm - sheet.marginsMm.top - sheet.marginsMm.bottom)
+    const assets = [...sourceDocument.assets]
+    const designs = [...sourceDocument.designs]
+
+    for (const photo of targetPhotos) {
+      const sourcePath = photo.url.startsWith('data:') || !getFolderOf(photo.path) ? null : photo.path
+      if (assets.some((asset) => (
+        sourcePath ? asset.sourcePath === sourcePath : photo.url.startsWith('data:') && asset.dataUrl === photo.url
+      ))) continue
+
+      const image = await loadImageResource(photo.url)
+      let dataUrl: string | null = photo.url.startsWith('data:') ? photo.url : null
+      if (!sourcePath && !dataUrl) {
+        const response = await fetch(photo.url)
+        if (!response.ok) throw new Error(`Unable to read ${photo.name}.`)
+        const blob = await response.blob()
+        dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result))
+          reader.onerror = () => reject(reader.error ?? new Error(`Unable to read ${photo.name}.`))
+          reader.readAsDataURL(blob)
+        })
+      }
+      if (assets.some((asset) => (
+        (sourcePath && asset.sourcePath === sourcePath) || (dataUrl && asset.dataUrl === dataUrl)
+      ))) continue
+
+      const crop = cropAppliedByPhoto[photo.id] ?? null
+      const aspectRatio = getCroppedArtworkAspectRatio(image.naturalWidth, image.naturalHeight, crop)
+      const widthMm = Math.min(60, availableWidth)
+      const heightMm = Math.min(widthMm / aspectRatio, availableHeight)
+      const actualWidthMm = Math.min(widthMm, heightMm * aspectRatio)
+      const assetId = crypto.randomUUID()
+      assets.push({
+        id: assetId,
+        name: photo.name,
+        mimeType: photo.url.startsWith('data:') ? photo.url.slice(5, photo.url.indexOf(';')) : 'image/*',
+        sourcePath,
+        dataUrl,
+        widthPx: image.naturalWidth,
+        heightPx: image.naturalHeight,
+      })
+      designs.push({
+        id: crypto.randomUUID(),
+        name: photo.name,
+        assetId,
+        widthMm: actualWidthMm,
+        heightMm,
+        quantity: 1,
+        allowRotation: true,
+        settings: settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS,
+        crop: crop ? { ...crop } : null,
+      })
+    }
+
+    return { ...sourceDocument, assets, designs }
   }
 
   const handleRemoveAllImages = () => {
@@ -1178,12 +1264,13 @@ function App() {
       onDocumentChange={setImpositionDocument}
       photos={photos}
       onAddPhoto={handlePlacePhotoOnImposition}
+      onPrepareAllPhotos={handlePrepareAllPhotosForImposition}
       onNew={() => {
         if (window.confirm('Start a new imposition? Unsaved changes in this document will be lost.')) {
           setImpositionDocument(createNewImpositionDocument())
         }
       }}
-      onClose={() => setShowImpositionBuilder(false)}
+      onClose={handleCloseImpositionBuilder}
     />
   ) : (
     <div className="app dark">

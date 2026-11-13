@@ -631,9 +631,11 @@ function createPrintPreviewHtml(payload: PrintPreviewPayload): string {
       const height = image.height / page.height * 100
       return `<img alt="" src="${source}" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%">`
     }).join('')
-    const lines = page.lines.map((line) =>
-      `<line x1="${line.x1}" y1="${line.y1}" x2="${line.x2}" y2="${line.y2}" stroke="black" stroke-width="${line.width}"/>`,
-    ).join('')
+    const lines = page.lines.map((line) => {
+      const stroke = /^#[\da-f]{6}$/i.test(line.color ?? '') ? line.color : '#000000'
+      const dashArray = line.dashArray?.length ? ` stroke-dasharray="${line.dashArray.join(' ')}"` : ''
+      return `<line x1="${line.x1}" y1="${line.y1}" x2="${line.x2}" y2="${line.y2}" stroke="${stroke}" stroke-width="${line.width}"${dashArray}/>`
+    }).join('')
 
     return `<section class="page-row"><div class="paper" data-page="${pageIndex + 1}"><div class="artwork">${images}<svg viewBox="0 0 ${page.width} ${page.height}" preserveAspectRatio="none" aria-hidden="true">${lines}</svg></div></div></section>`
   }).join('')

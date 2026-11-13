@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type {
+  InputHTMLAttributes,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react'
 import { renderProcessedImageAsync } from '../engine/renderProcessed'
 import { NEUTRAL_SETTINGS, SLIDERS } from '../lib/editorConstants'
 import { createCroppedCanvas, createFitCanvas } from '../lib/canvasUtils'
@@ -25,6 +29,11 @@ type Props = {
   onDocumentChange: (document: ImpositionDocument) => void
   photos: Photo[]
   onAddPhoto: (photo: Photo, sheetId: string) => void
+  onPrepareAllPhotos: (
+    photos: Photo[],
+    document: ImpositionDocument,
+    sheetId: string,
+  ) => Promise<ImpositionDocument>
   onNew: () => void
   onClose: () => void
 }
@@ -65,7 +74,52 @@ function formatMeasurement(valueMm: number, units: ImpositionUnits): string {
   return fromMillimetres(valueMm, units).toFixed(units === 'mm' ? 1 : 2)
 }
 
-export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPhoto, onNew, onClose }: Props) {
+type NumericInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> & {
+  value: number | string
+  onChange: (value: string) => void
+}
+
+function NumericInput({ value, onChange, onFocus, onBlur, ...props }: NumericInputProps) {
+  const displayValue = String(value)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(displayValue)
+
+  useEffect(() => {
+    if (!editing) setDraft(displayValue)
+  }, [displayValue, editing])
+
+  return (
+    <input
+      {...props}
+      type="number"
+      inputMode="decimal"
+      value={editing ? draft : displayValue}
+      onFocus={(event) => {
+        setEditing(true)
+        setDraft(event.currentTarget.value)
+        onFocus?.(event)
+      }}
+      onBlur={(event) => {
+        setEditing(false)
+        onBlur?.(event)
+      }}
+      onChange={(event) => {
+        setDraft(event.currentTarget.value)
+        onChange(event.currentTarget.value)
+      }}
+    />
+  )
+}
+
+export function ImpositionBuilder({
+  document,
+  onDocumentChange,
+  photos,
+  onAddPhoto,
+  onPrepareAllPhotos,
+  onNew,
+  onClose,
+}: Props) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{
@@ -94,6 +148,8 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
   const [undoStack, setUndoStack] = useState<ImpositionDocument[]>([])
   const [redoStack, setRedoStack] = useState<ImpositionDocument[]>([])
   const [lockAspectRatio, setLockAspectRatio] = useState(true)
+  const [applySizeToAllArtwork, setApplySizeToAllArtwork] = useState(false)
+  const [layoutPending, setLayoutPending] = useState(false)
   const activeSheetIndex = Math.max(0, document.sheets.findIndex((current) => current.id === activeSheetId))
   const sheet = document.sheets[activeSheetIndex]!
   const dimensions = useMemo(() => resolveSheetDimensionsMm(sheet), [sheet])
@@ -435,6 +491,57 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
     })
   }
 
+  const updateArtworkSize = (key: 'widthMm' | 'heightMm', value: number) => {
+    if (!selectedObject) return
+    const nextSizeMm = toMillimetres(value, document.units)
+    if (!applySizeToAllArtwork || selectedObject.type !== 'image') {
+      updateSelected((object) => {
+        const oldAspect = object.widthMm * object.scaleX / Math.max(0.001, object.heightMm * object.scaleY)
+        if (key === 'widthMm') {
+          const scaleX = nextSizeMm / Math.max(0.001, object.widthMm)
+          const scaleY = lockAspectRatio ? nextSizeMm / oldAspect / Math.max(0.001, object.heightMm) : object.scaleY
+          return { ...object, scaleX, scaleY }
+        }
+        const scaleY = nextSizeMm / Math.max(0.001, object.heightMm)
+        const scaleX = lockAspectRatio ? nextSizeMm * oldAspect / Math.max(0.001, object.widthMm) : object.scaleX
+        return { ...object, scaleX, scaleY }
+      })
+      return
+    }
+
+    if (!editHistoryStartedRef.current) {
+      setUndoStack((current) => [...current.slice(-99), document])
+      setRedoStack([])
+    }
+    const designs = document.designs.map((design) => {
+      const aspect = design.widthMm / Math.max(0.001, design.heightMm)
+      return {
+        ...design,
+        widthMm: key === 'widthMm'
+          ? nextSizeMm
+          : lockAspectRatio ? nextSizeMm * aspect : design.widthMm,
+        heightMm: key === 'heightMm'
+          ? nextSizeMm
+          : lockAspectRatio ? nextSizeMm / aspect : design.heightMm,
+      }
+    })
+    const sizesByDesign = new Map(designs.map((design) => [design.id, design]))
+    onDocumentChange({
+      ...document,
+      designs,
+      sheets: document.sheets.map((current) => ({
+        ...current,
+        objects: current.objects.map((object) => {
+          if (object.type !== 'image') return object
+          const design = sizesByDesign.get(object.designId)
+          return design
+            ? { ...object, widthMm: design.widthMm, heightMm: design.heightMm, scaleX: 1, scaleY: 1 }
+            : object
+        }),
+      })),
+    })
+  }
+
   const alignSelected = (alignment: 'left' | 'right' | 'top' | 'bottom' | 'center-x' | 'center-y') => {
     if (selectedObjects.length < 2) return
     const bounds = selectedObjects.map((object) => ({
@@ -585,18 +692,33 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
     commitDocument({ ...document, sheets })
   }
 
-  const generateAutomaticLayout = () => {
+  const generateAutomaticLayout = async (includeLibraryPhotos = false) => {
+    if (layoutPending) return
+    setLayoutPending(true)
     try {
-      const result = createAutomaticLayout(document, sheet.id)
+      const sourceDocument = includeLibraryPhotos && photos.length
+        ? await onPrepareAllPhotos(photos, document, sheet.id)
+        : document
+      const result = createAutomaticLayout(sourceDocument, sheet.id)
       commitDocument(result.document)
       setActiveSheetId(result.sourceSheetId)
       setSelectedIds([])
       const warning = result.unplacedDesignNames.length
         ? ` ${result.unplacedDesignNames.length} copy/copies could not fit: ${[...new Set(result.unplacedDesignNames)].join(', ')}.`
         : ''
-      window.alert(`Placed ${result.placedCopies} copies across ${result.sheetsUsed} sheet(s).${warning}`)
+      const quantities = result.designQuantities
+        .map((item) => `${item.name}: ${item.placed}/${item.requested}`)
+        .join('; ')
+      const wastePercent = Math.max(0, 100 - result.utilizationPercent)
+      window.alert(
+        `Placed ${result.placedCopies}/${result.requestedCopies} requested copies across ${result.sheetsUsed} sheet(s). `
+        + `Artwork utilization: ${result.utilizationPercent.toFixed(1)}%; unused printable area: ${wastePercent.toFixed(1)}%. `
+        + `Quantities: ${quantities}.${warning}`,
+      )
     } catch (error) {
       window.alert(error instanceof Error ? error.message : 'Could not generate the automatic layout.')
+    } finally {
+      setLayoutPending(false)
     }
   }
 
@@ -1169,23 +1291,35 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
       <header className="imposition-toolbar">
         <div className="imposition-brand"><span className="imposition-brand-mark">P</span><strong>Imposition Builder</strong></div>
         <div className="imposition-toolbar-actions">
-          <button type="button" onClick={onNew}>New imposition</button>
-          <button type="button" onClick={() => void openImpositionProject()}>Open project</button>
-          <button type="button" onClick={() => void saveImpositionProject()}>Save project</button>
-          <button type="button" onClick={generateAutomaticLayout} disabled={!document.designs.length}>Auto imposition</button>
-          <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>{exporting ? 'Checking…' : 'Preflight'}</button>
-          <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Export</button>
-          <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Print-ready PDF</button>
+          <div className="imposition-toolbar-group" role="group" aria-label="Project">
+            <button type="button" onClick={onNew}>New</button>
+            <button type="button" onClick={() => void openImpositionProject()}>Open</button>
+            <button type="button" onClick={() => void saveImpositionProject()}>Save</button>
+          </div>
           <span className="imposition-toolbar-separator" />
-          <button type="button" title="Undo" onClick={undo} disabled={!undoStack.length}>Undo</button>
-          <button type="button" title="Redo" onClick={redo} disabled={!redoStack.length}>Redo</button>
-          <button type="button" title="Copy" onClick={copySelected} disabled={!selectedIds.length}>Copy</button>
-          <button type="button" title="Paste" onClick={pasteSelected} disabled={!pasteBufferRef.current.objects.length}>Paste</button>
-          <button type="button" title="Zoom out" onClick={() => setZoom((value) => Math.max(0.1, value / 1.2))}>−</button>
-          <span className="imposition-zoom-value">{Math.round(zoom * 100)}%</span>
-          <button type="button" title="Zoom in" onClick={() => setZoom((value) => Math.min(4, value * 1.2))}>+</button>
-          <button type="button" onClick={fitSheet}>Fit sheet</button>
-          <button type="button" onClick={() => setZoom(1)} title="Preview at 96 CSS pixels per inch">Actual size</button>
+          <div className="imposition-toolbar-group" role="group" aria-label="Layout and export">
+            <button type="button" className="imposition-toolbar-primary" title="Import and arrange all photos from the artwork library" onClick={() => void generateAutomaticLayout(true)} disabled={layoutPending || (!document.designs.length && !photos.length)}>
+              {layoutPending ? 'Arranging…' : 'Arrange all photos'}
+            </button>
+            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>{exporting ? 'Checking…' : 'Preflight'}</button>
+            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Export</button>
+            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Print-ready PDF</button>
+          </div>
+          <span className="imposition-toolbar-separator" />
+          <div className="imposition-toolbar-group" role="group" aria-label="Edit">
+            <button type="button" title="Undo" onClick={undo} disabled={!undoStack.length}>Undo</button>
+            <button type="button" title="Redo" onClick={redo} disabled={!redoStack.length}>Redo</button>
+            <button type="button" title="Copy" onClick={copySelected} disabled={!selectedIds.length}>Copy</button>
+            <button type="button" title="Paste" onClick={pasteSelected} disabled={!pasteBufferRef.current.objects.length}>Paste</button>
+          </div>
+          <span className="imposition-toolbar-separator" />
+          <div className="imposition-toolbar-group imposition-zoom-controls" role="group" aria-label="Canvas zoom">
+            <button type="button" title="Zoom out" onClick={() => setZoom((value) => Math.max(0.1, value / 1.2))}>−</button>
+            <span className="imposition-zoom-value">{Math.round(zoom * 100)}%</span>
+            <button type="button" title="Zoom in" onClick={() => setZoom((value) => Math.min(4, value * 1.2))}>+</button>
+            <button type="button" onClick={fitSheet}>Fit sheet</button>
+            <button type="button" onClick={() => setZoom(1)} title="Preview at 96 CSS pixels per inch">Actual size</button>
+          </div>
           <button type="button" className="imposition-close" onClick={onClose}>Back to editor</button>
         </div>
       </header>
@@ -1193,8 +1327,12 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
       <div className="imposition-body">
         <aside className="imposition-library">
           <section>
-            <h2>Artwork library</h2>
-            {photos.length === 0 ? <p className="imposition-empty">Add photos in the editor to place them here.</p> : null}
+            <div className="imposition-section-heading">
+              <h2>Artwork</h2>
+              <span className="imposition-count">{photos.length}</span>
+            </div>
+            <p className="imposition-help-text">Click a photo to add it to this sheet.</p>
+            {photos.length === 0 ? <p className="imposition-empty">Photos added in the editor will appear here.</p> : null}
             {photos.map((photo) => (
               <button type="button" className="imposition-artwork-entry" key={photo.id} onClick={() => onAddPhoto(photo, sheet.id)} title={`Place ${photo.name} on the sheet`}>
                 <img src={photo.thumbnailUrl ?? photo.url} alt="" />
@@ -1210,13 +1348,14 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               <button type="button" onClick={() => createBaseObject('Ellipse', 'ellipse')}>Ellipse</button>
               <button type="button" onClick={() => createBaseObject('Line', 'line')}>Line</button>
               <button type="button" onClick={() => createBaseObject('Text', 'text')}>Text</button>
-              <button type="button" onClick={() => addGuide('horizontal')}>+ H guide</button>
-              <button type="button" onClick={() => addGuide('vertical')}>+ V guide</button>
+              <button type="button" onClick={() => addGuide('horizontal')}>Horizontal guide</button>
+              <button type="button" onClick={() => addGuide('vertical')}>Vertical guide</button>
             </div>
           </section>
           <section>
             <div className="imposition-section-heading">
               <h2>Layers</h2>
+              <span className="imposition-count">{sheet.layers.length}</span>
               <button type="button" title="Add layer" onClick={addLayer}>+</button>
             </div>
             {sheet.layers.map((layer) => (
@@ -1226,6 +1365,13 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
                 <button type="button" title={layer.locked ? 'Unlock layer' : 'Lock layer'} onClick={() => updateLayer(layer.id, (item) => ({ ...item, locked: !item.locked }))}>{layer.locked ? '🔒' : '⌑'}</button>
               </div>
             ))}
+          </section>
+          <section>
+            <div className="imposition-section-heading">
+              <h2>Objects on sheet</h2>
+              <span className="imposition-count">{sheet.objects.length}</span>
+            </div>
+            {sheet.objects.length === 0 ? <p className="imposition-empty">Add artwork or a shape to get started.</p> : null}
             {sheet.objects.map((object) => (
               <button
                 type="button"
@@ -1240,6 +1386,7 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
           <section>
             <div className="imposition-section-heading">
               <h2>Sheets</h2>
+              <span className="imposition-count">{document.sheets.length}</span>
               <button type="button" title="Add sheet" onClick={addSheet}>+</button>
             </div>
             {document.sheets.map((item, index) => (
@@ -1329,7 +1476,7 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
                     x2={mark.x2}
                     y2={mark.y2}
                     stroke={mark.color}
-                    strokeWidth={mark.widthMm}
+                    strokeWidth={Math.max(mark.widthMm, 0.15 / (CSS_PIXELS_PER_MM * zoom))}
                     strokeDasharray={mark.dashArray}
                     pointerEvents="none"
                   />
@@ -1345,6 +1492,11 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
 
         <aside className="imposition-properties">
           <h2>{selectedObject ? 'Object properties' : 'Sheet properties'}</h2>
+          <p className="imposition-help-text">
+            {selectedObject
+              ? `Edit “${selectedObject.name}” or use the object list to select another item.`
+              : 'Set up the page and layout, or select an object to edit it.'}
+          </p>
           {selectedObject ? (
             <>
               <label>
@@ -1354,15 +1506,14 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               <div className="imposition-dimensions">
                 {(['xMm', 'yMm'] as const).map((key) => (
                   <label key={key}>{key[0].toUpperCase()} ({UNIT_LABELS[document.units]})
-                    <input
-                      type="number"
+                    <NumericInput
                       step="0.1"
                       value={formatMeasurement(selectedObject[key], document.units)}
                       onFocus={beginFieldEdit}
                       onBlur={endFieldEdit}
                       disabled={selectedObjectLocked}
-                      onChange={(event) => {
-                        const value = Number(event.target.value)
+                      onChange={(rawValue) => {
+                        const value = Number(rawValue)
                         if (Number.isFinite(value)) updateSelected((object) => ({ ...object, [key]: toMillimetres(value, document.units) }))
                       }}
                     />
@@ -1372,40 +1523,33 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               <div className="imposition-dimensions">
                 {(['widthMm', 'heightMm'] as const).map((key) => (
                   <label key={key}>{key === 'widthMm' ? 'Width' : 'Height'} ({UNIT_LABELS[document.units]})
-                    <input
-                      type="number"
+                    <NumericInput
                       min="0.1"
                       step="0.1"
                       value={formatMeasurement(selectedObject[key] * (key === 'widthMm' ? selectedObject.scaleX : selectedObject.scaleY), document.units)}
                       onFocus={beginFieldEdit}
                       onBlur={endFieldEdit}
                       disabled={selectedObjectLocked}
-                      onChange={(event) => {
-                        const value = Number(event.target.value)
-                        if (!Number.isFinite(value) || value <= 0) return
-                        updateSelected((object) => {
-                          const nextSize = toMillimetres(value, document.units)
-                          const oldAspect = object.widthMm * object.scaleX / Math.max(0.001, object.heightMm * object.scaleY)
-                          if (key === 'widthMm') {
-                            const scaleX = nextSize / Math.max(0.001, object.widthMm)
-                            const scaleY = lockAspectRatio ? nextSize / oldAspect / Math.max(0.001, object.heightMm) : object.scaleY
-                            return { ...object, scaleX, scaleY }
-                          }
-                          const scaleY = nextSize / Math.max(0.001, object.heightMm)
-                          const scaleX = lockAspectRatio ? nextSize * oldAspect / Math.max(0.001, object.widthMm) : object.scaleX
-                          return { ...object, scaleX, scaleY }
-                        })
+                      onChange={(rawValue) => {
+                        const value = Number(rawValue)
+                        if (Number.isFinite(value) && value > 0) updateArtworkSize(key, value)
                       }}
                     />
                   </label>
                 ))}
               </div>
               <label className="imposition-checkbox"><input type="checkbox" checked={lockAspectRatio} onChange={(event) => setLockAspectRatio(event.target.checked)} /> Lock aspect ratio</label>
+              {selectedObject.type === 'image' ? (
+                <label className="imposition-checkbox imposition-global-size">
+                  <input type="checkbox" checked={applySizeToAllArtwork} onChange={(event) => setApplySizeToAllArtwork(event.target.checked)} />
+                  Apply size changes to all designs
+                </label>
+              ) : null}
               <div className="imposition-dimensions">
                 {(['scaleX', 'scaleY'] as const).map((key) => (
                   <label key={key}>{key === 'scaleX' ? 'Scale X' : 'Scale Y'}
-                    <input type="number" min="0.01" step="0.01" value={selectedObject[key]} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(event) => {
-                      const value = Number(event.target.value)
+                    <NumericInput min="0.01" step="0.01" value={selectedObject[key]} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
+                      const value = Number(rawValue)
                       if (Number.isFinite(value) && value > 0) updateSelected((object) => ({ ...object, [key]: value }))
                     }} />
                   </label>
@@ -1413,8 +1557,8 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               </div>
               <label>
                 Rotation (°)
-                <input type="number" step="1" value={selectedObject.rotationDeg} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(event) => {
-                  const value = Number(event.target.value)
+                <NumericInput step="1" value={selectedObject.rotationDeg} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
+                  const value = Number(rawValue)
                   if (Number.isFinite(value)) updateSelected((object) => ({ ...object, rotationDeg: value }))
                 }} />
               </label>
@@ -1422,16 +1566,15 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
                 <>
                   <label>
                     Copies of design
-                    <input
-                      type="number"
+                    <NumericInput
                       min="1"
                       step="1"
                       value={document.designs.find((design) => design.id === selectedObject.designId)?.quantity ?? 1}
                       onFocus={beginFieldEdit}
                       onBlur={endFieldEdit}
                       disabled={selectedObjectLocked}
-                      onChange={(event) => {
-                        const quantity = Math.floor(Number(event.target.value))
+                      onChange={(rawValue) => {
+                        const quantity = Math.floor(Number(rawValue))
                         if (Number.isFinite(quantity) && quantity > 0) {
                           onDocumentChange({
                             ...document,
@@ -1511,18 +1654,36 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
                   {sheet.layers.map((layer) => <option key={layer.id} value={layer.id} disabled={layer.locked || !layer.visible}>{layer.name}</option>)}
                 </select>
               </label>
+              <div className="imposition-inspector-subheading">
+                <strong>Arrange selection</strong>
+                <span>Select 2 or more objects to align or group them.</span>
+              </div>
               <div className="imposition-align-actions">
-                {(['left', 'center-x', 'right', 'top', 'center-y', 'bottom'] as const).map((alignment) => (
-                  <button type="button" key={alignment} disabled={selectedObjects.length < 2} onClick={() => alignSelected(alignment)}>{alignment}</button>
+                {([
+                  ['left', 'Left'],
+                  ['center-x', 'Center H'],
+                  ['right', 'Right'],
+                  ['top', 'Top'],
+                  ['center-y', 'Center V'],
+                  ['bottom', 'Bottom'],
+                ] as const).map(([alignment, label]) => (
+                  <button type="button" key={alignment} title={`Align ${alignment}`} disabled={selectedObjects.length < 2} onClick={() => alignSelected(alignment)}>{label}</button>
                 ))}
-                <button type="button" disabled={selectedObjects.length < 3} onClick={() => distributeSelected('horizontal')}>Distribute H</button>
-                <button type="button" disabled={selectedObjects.length < 3} onClick={() => distributeSelected('vertical')}>Distribute V</button>
-                <button type="button" disabled={selectedObjects.length < 2} onClick={groupSelected}>Group</button>
-                <button type="button" disabled={!selectedObject?.groupId} onClick={ungroupSelected}>Ungroup</button>
+                <button type="button" title="Distribute horizontally" disabled={selectedObjects.length < 3} onClick={() => distributeSelected('horizontal')}>Distribute H</button>
+                <button type="button" title="Distribute vertically" disabled={selectedObjects.length < 3} onClick={() => distributeSelected('vertical')}>Distribute V</button>
+                <button type="button" title="Group selected objects" disabled={selectedObjects.length < 2} onClick={groupSelected}>Group</button>
+                <button type="button" title="Ungroup objects" disabled={!selectedObject?.groupId} onClick={ungroupSelected}>Ungroup</button>
               </div>
             </>
           ) : (
           <>
+          <details className="imposition-settings-group">
+            <summary>
+              <span>Page setup</span>
+              <span className="imposition-summary-meta">{PAPER_LABELS[sheet.paper.size]} · {sheet.paper.orientation}</span>
+            </summary>
+            <p className="imposition-help-text">Choose the paper, units, printable area, and PDF resolution.</p>
+            <div className="imposition-settings-content">
           <label>
             Sheet name
             <input value={sheet.name} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => updateSheet((current) => ({ ...current, name: event.target.value }))} />
@@ -1554,8 +1715,8 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
           </label>
           {sheet.paper.size === 'custom' ? (
             <div className="imposition-dimensions">
-              <label>Width ({UNIT_LABELS[document.units]})<input type="number" min="0.1" step="0.1" value={formatMeasurement(dimensions.widthMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => setCustomDimension('widthMm', event.target.value)} /></label>
-              <label>Height ({UNIT_LABELS[document.units]})<input type="number" min="0.1" step="0.1" value={formatMeasurement(dimensions.heightMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => setCustomDimension('heightMm', event.target.value)} /></label>
+              <label>Width ({UNIT_LABELS[document.units]})<NumericInput min="0.1" step="0.1" value={formatMeasurement(dimensions.widthMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('widthMm', value)} /></label>
+              <label>Height ({UNIT_LABELS[document.units]})<NumericInput min="0.1" step="0.1" value={formatMeasurement(dimensions.heightMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('heightMm', value)} /></label>
             </div>
           ) : null}
           <fieldset>
@@ -1563,66 +1724,71 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
             {(['top', 'right', 'bottom', 'left'] as const).map((edge) => (
               <label className="imposition-margin-field" key={edge}>
                 {edge[0].toUpperCase() + edge.slice(1)}
-                <input type="number" min="0" step="0.1" value={formatMeasurement(sheet.marginsMm[edge], document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => updateMeasurement(edge, event.target.value)} />
+                <NumericInput min="0" step="0.1" value={formatMeasurement(sheet.marginsMm[edge], document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => updateMeasurement(edge, value)} />
               </label>
             ))}
           </fieldset>
           <label>
             Bleed ({UNIT_LABELS[document.units]})
-            <input
-              type="number"
+            <NumericInput
               min="0"
               step="0.1"
               value={formatMeasurement(sheet.bleedMm, document.units)}
               onFocus={beginFieldEdit}
               onBlur={endFieldEdit}
-              onChange={(event) => {
-                const value = Number(event.target.value)
+              onChange={(rawValue) => {
+                const value = Number(rawValue)
                 if (Number.isFinite(value) && value >= 0) updateSheet((current) => ({ ...current, bleedMm: toMillimetres(value, document.units) }))
               }}
             />
           </label>
           <label>
             Safe area ({UNIT_LABELS[document.units]})
-            <input
-              type="number"
+            <NumericInput
               min="0"
               step="0.1"
               value={formatMeasurement(sheet.safeAreaMm, document.units)}
               onFocus={beginFieldEdit}
               onBlur={endFieldEdit}
-              onChange={(event) => {
-                const value = Number(event.target.value)
+              onChange={(rawValue) => {
+                const value = Number(rawValue)
                 if (Number.isFinite(value) && value >= 0) updateSheet((current) => ({ ...current, safeAreaMm: toMillimetres(value, document.units) }))
               }}
             />
           </label>
           <label>
             PDF output resolution (DPI)
-            <input
-              type="number"
+            <NumericInput
               min="72"
               max="1200"
               step="1"
               value={document.export.dpi}
               onFocus={beginFieldEdit}
               onBlur={endFieldEdit}
-              onChange={(event) => {
-                const dpi = Math.floor(Number(event.target.value))
+              onChange={(rawValue) => {
+                const dpi = Math.floor(Number(rawValue))
                 if (Number.isFinite(dpi) && dpi >= 72 && dpi <= 1200) {
                   onDocumentChange({ ...document, export: { ...document.export, dpi } })
                 }
               }}
             />
           </label>
+            </div>
+          </details>
           <fieldset>
             <legend>Automatic layout</legend>
+            <p className="imposition-help-text">Choose how imported artwork is repeated and spaced on the sheet.</p>
             <label>
               Strategy
               <select value={sheet.layout.mode} onChange={(event) => updateSheet((current) => ({
                 ...current,
-                layout: { ...current.layout, mode: event.target.value as typeof current.layout.mode },
+                layout: {
+                  ...current.layout,
+                  mode: event.target.value as typeof current.layout.mode,
+                  ...(event.target.value === 'edge-to-edge' ? { horizontalGapMm: 0, verticalGapMm: 0 } : {}),
+                },
               }))}>
+                <option value="edge-to-edge">Edge to edge (cut marks)</option>
                 <option value="grid">Grid</option>
                 <option value="step-repeat">Step and repeat</option>
                 <option value="best-fit">Best fit (shelf heuristic)</option>
@@ -1632,15 +1798,15 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
             {(['horizontalGapMm', 'verticalGapMm'] as const).map((key) => (
               <label className="imposition-margin-field" key={key}>
                 {key === 'horizontalGapMm' ? 'Horizontal gap' : 'Vertical gap'} ({UNIT_LABELS[document.units]})
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="0.1"
                   value={formatMeasurement(sheet.layout[key], document.units)}
                   onFocus={beginFieldEdit}
                   onBlur={endFieldEdit}
-                  onChange={(event) => {
-                    const value = Number(event.target.value)
+                  disabled={sheet.layout.mode === 'edge-to-edge'}
+                  onChange={(rawValue) => {
+                    const value = Number(rawValue)
                     if (Number.isFinite(value) && value >= 0) {
                       updateSheet((current) => ({
                         ...current,
@@ -1658,10 +1824,18 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               }))} />
               Allow 90° rotation
             </label>
-            <button type="button" className="imposition-run-layout" onClick={generateAutomaticLayout} disabled={!document.designs.length}>Generate layout</button>
+            <button type="button" className="imposition-run-layout" title="Import and arrange all photos from the artwork library" onClick={() => void generateAutomaticLayout(true)} disabled={layoutPending || (!document.designs.length && !photos.length)}>
+              {layoutPending ? 'Arranging photos…' : 'Arrange all photos'}
+            </button>
           </fieldset>
-          <fieldset>
-            <legend>Cut marks</legend>
+          <details className="imposition-settings-group">
+            <summary>
+              <span>Cut marks</span>
+              <span className={`imposition-summary-meta${sheet.cutMarks.enabled ? ' is-on' : ''}`}>{sheet.cutMarks.enabled ? 'On' : 'Off'}</span>
+            </summary>
+            <p className="imposition-help-text">Control cutting guides and choose whether they appear in the workspace and PDF.</p>
+            <fieldset>
+            <legend>Mark options</legend>
             <label className="imposition-checkbox">
               <input type="checkbox" checked={sheet.cutMarks.enabled} onChange={(event) => updateSheet((current) => ({
                 ...current,
@@ -1705,16 +1879,15 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
             ] as const).map(([key, label]) => (
               <label className="imposition-margin-field" key={key}>
                 {label} (mm)
-                <input
-                  type="number"
-                  min={key === 'lineWidthMm' ? '0.01' : '0'}
-                  step="0.1"
-                  value={formatMeasurement(sheet.cutMarks[key], 'mm')}
+                <NumericInput
+                  min="0"
+                  step={key === 'lineWidthMm' ? '0.01' : '0.1'}
+                  value={key === 'lineWidthMm' ? sheet.cutMarks.lineWidthMm.toFixed(2) : formatMeasurement(sheet.cutMarks[key], 'mm')}
                   onFocus={beginFieldEdit}
                   onBlur={endFieldEdit}
-                  onChange={(event) => {
-                    const value = Number(event.target.value)
-                    if (Number.isFinite(value) && value >= (key === 'lineWidthMm' ? 0.01 : 0)) {
+                  onChange={(rawValue) => {
+                    const value = Number(rawValue)
+                    if (Number.isFinite(value) && value >= 0) {
                       updateSheet((current) => ({
                         ...current,
                         cutMarks: { ...current.cutMarks, [key]: value },
@@ -1749,7 +1922,8 @@ export function ImpositionBuilder({ document, onDocumentChange, photos, onAddPho
               })} />
               Include marks in export
             </label>
-          </fieldset>
+            </fieldset>
+          </details>
           </>
           )}
         </aside>
