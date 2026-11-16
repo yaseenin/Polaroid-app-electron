@@ -970,9 +970,9 @@ button {
 
 .export-dialog-body {
   display: grid;
-  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
-  gap: 16px;
-  padding: 16px 20px 12px;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 16px 8px;
   background: var(--panel);
   overflow: hidden;
   flex: 1;
@@ -1001,16 +1001,17 @@ button {
 .export-controls {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .template-row.compact {
   margin: 0;
 }
 
+.template-row.compact select,
 .template-row.compact input[type='number'] {
   width: 100%;
-  height: var(--input-height);
+  height: 30px;
   border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--input-bg);
@@ -1023,7 +1024,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 5px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--panel-elevated);
@@ -1032,8 +1033,8 @@ button {
 }
 
 .toggle-row input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   accent-color: var(--accent);
 }
 
@@ -1069,6 +1070,36 @@ button {
   flex-shrink: 0;
 }
 
+.export-preview-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.export-preview-zoom button {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+}
+
+.export-preview-zoom button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-hover);
+}
+
+.export-preview-zoom button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .export-preview-meta {
   color: var(--text-secondary);
   font-size: 11px;
@@ -1079,18 +1110,37 @@ button {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--panel-elevated);
+}
+
+.export-preview-viewport::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.export-preview-viewport::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+.export-preview-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+.export-preview-stage {
   display: grid;
   place-items: center;
-  overflow: hidden;
+  min-width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 .export-preview-canvas {
   display: block;
-  width: auto;
-  height: auto;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+  max-width: none;
+  max-height: none;
   border-radius: 3px;
   background: #fff;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
@@ -1135,12 +1185,12 @@ button {
 
 .grid-position-buttons {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 
 .grid-position-buttons button {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   font-size: 16px;
   line-height: 1;
@@ -1149,8 +1199,29 @@ button {
 
 .grid-position-buttons button.reset-grid {
   width: auto;
-  padding: 0 10px;
+  padding: 0 7px;
   font-size: 12px;
+}
+
+.export-settings-scroll .grid-position-row {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.export-settings-scroll .export-pagination {
+  gap: 6px;
+  padding: 8px 0 0;
+}
+
+.export-settings-scroll .export-pagination button {
+  min-width: 64px;
+  height: 28px;
+  padding: 0 6px;
+}
+
+.export-settings-scroll .export-pagination span {
+  min-width: 70px;
 }
 
 .grid-offset-value {

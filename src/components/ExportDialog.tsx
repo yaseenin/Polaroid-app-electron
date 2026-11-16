@@ -3,11 +3,11 @@ import {
   PAPER_SIZES,
   PRESETS,
   buildSheetLayout,
-  fitImageToFrame,
+  renderSheet,
   type PaperSizeKey,
   type PresetKey,
 } from '../engine/polaroidEngine'
-import { DEFAULT_BLUR_RADIUS } from '../lib/canvasUtils'
+import { NEUTRAL_SETTINGS } from '../lib/editorConstants'
 import type { BuildCard, ExportFormat, ExportOrientation, Photo } from '../types'
 
 type ExportDialogProps = {
@@ -67,8 +67,10 @@ export function ExportDialog({
   onPreviewError,
 }: ExportDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
+  const [sheetSize, setSheetSize] = useState({ width: 0, height: 0 })
+  const [previewZoom, setPreviewZoom] = useState(1)
 
   // Keeps the latest offset values so auto-repeat intervals never read stale state.
   const offsetRef = useRef({ x: gridOffsetX, y: gridOffsetY })
@@ -104,15 +106,12 @@ export function ExportDialog({
   }, [stopNudge])
 
   useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect
-        setContainerSize({ width, height })
-      }
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const observer = new ResizeObserver(([entry]) => {
+      setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height })
     })
-    observer.observe(container)
+    observer.observe(viewport)
     return () => observer.disconnect()
   }, [])
 
@@ -123,6 +122,18 @@ export function ExportDialog({
 
   const totalPages = Math.max(1, Math.ceil(photos.length / maxImagesPerPage))
   const currentPage = Math.min(previewPage, totalPages - 1)
+  const photosOnCurrentSheet = Math.min(maxImagesPerPage, Math.max(0, photos.length - currentPage * maxImagesPerPage))
+  const fitScale = sheetSize.width && sheetSize.height && viewportSize.width && viewportSize.height
+    ? Math.min(
+      Math.max(1, viewportSize.width - 32) / sheetSize.width,
+      Math.max(1, viewportSize.height - 32) / sheetSize.height,
+      1,
+    )
+    : 1
+  const previewWidth = Math.round(sheetSize.width * fitScale * previewZoom)
+  const previewHeight = Math.round(sheetSize.height * fitScale * previewZoom)
+  const stageWidth = Math.max(viewportSize.width, previewWidth)
+  const stageHeight = Math.max(viewportSize.height, previewHeight)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -132,101 +143,74 @@ export function ExportDialog({
 
     const render = async () => {
       try {
-        const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, orientation)
         const startIndex = currentPage * maxImagesPerPage
         const pagePhotos = photos.slice(startIndex, startIndex + maxImagesPerPage)
-
-        const containerW = Math.max(1, (containerSize?.width ?? 640) - 48)
-        const containerH = Math.max(1, (containerSize?.height ?? 440) - 48)
-        const previewScale = Math.min(containerW / layout.sheetW, containerH / layout.sheetH, 1)
-        const sheetW = Math.max(1, Math.round(layout.sheetW * previewScale))
-        const sheetH = Math.max(1, Math.round(layout.sheetH * previewScale))
-
         const base = PRESETS[preset]
-        const scaled = {
-          ...base,
-          frameW: Math.round(base.frameW * previewScale),
-          frameH: Math.round(base.frameH * previewScale),
-          photoW: Math.round(base.photoW * previewScale),
-          photoH: Math.round(base.photoH * previewScale),
-          offsetX: Math.round(base.offsetX * previewScale),
-          offsetY: Math.round(base.offsetY * previewScale),
-        }
-
-        const blurRadius = Math.max(1, DEFAULT_BLUR_RADIUS * previewScale)
         const cards: HTMLCanvasElement[] = []
         for (const photo of pagePhotos) {
-          try {
-            cards.push(await buildCard(photo, scaled.photoW, scaled.photoH, { preview: true, blurRadius }))
-          } catch {
-            // Skip photos that fail to load; the rest of the preview still renders.
-          }
+          cards.push(await buildCard(photo, base.photoW, base.photoH, { preview: false }))
           if (cancelled) return
         }
         if (!cards.length) return
 
-        const sheet = document.createElement('canvas')
-        sheet.width = sheetW
-        sheet.height = sheetH
-        const sheetContext = sheet.getContext('2d')
-        if (!sheetContext) return
+        const offset = { offsetX: gridOffsetX, offsetY: gridOffsetY }
+        if (format !== 'pdf') {
+          const sheet = await renderSheet(cards, preset, NEUTRAL_SETTINGS, paperSize, autoRotate, offset, orientation)
+          if (cancelled) return
+          canvas.width = sheet.width
+          canvas.height = sheet.height
+          const context = canvas.getContext('2d')
+          if (!context) throw new Error('Unable to initialize the export preview canvas.')
+          context.drawImage(sheet, 0, 0)
+          setSheetSize({ width: sheet.width, height: sheet.height })
+          return
+        }
 
-        sheetContext.fillStyle = '#ffffff'
-        sheetContext.fillRect(0, 0, sheetW, sheetH)
-
+        const layout = buildSheetLayout(base, cards.length, paperSize, offset, orientation)
         const usedCols = Math.max(1, Math.ceil(cards.length / layout.rows))
         const usedRows = usedCols > 1 ? layout.rows : Math.max(1, cards.length)
-        const marginX = (sheetW - usedCols * scaled.frameW) / 2 + Math.round(gridOffsetX * previewScale)
-        const marginY = (sheetH - usedRows * scaled.frameH) / 2 + Math.round(gridOffsetY * previewScale)
-
-        cards.forEach((card, i) => {
-          const col = Math.floor(i / layout.rows)
-          const row = i % layout.rows
-          const x = marginX + col * scaled.frameW
-          const y = marginY + row * scaled.frameH
-          const fit = fitImageToFrame(card.width, card.height, scaled)
-          sheetContext.drawImage(card, x + fit.offsetX, y + fit.offsetY, fit.width, fit.height)
-        })
-
-        // Crop marks
-        sheetContext.strokeStyle = '#000000'
-        sheetContext.lineWidth = 1
-        const markLen = Math.round(layout.markLength * previewScale)
-        const gridW = usedCols * scaled.frameW
-        const gridH = usedRows * scaled.frameH
-
-        for (let i = 0; i <= usedCols; i += 1) {
-          const x = marginX + i * scaled.frameW
-          sheetContext.beginPath()
-          sheetContext.moveTo(x, marginY - markLen)
-          sheetContext.lineTo(x, marginY)
-          sheetContext.moveTo(x, marginY + gridH)
-          sheetContext.lineTo(x, marginY + gridH + markLen)
-          sheetContext.stroke()
-        }
-        for (let i = 0; i <= usedRows; i += 1) {
-          const y = marginY + i * scaled.frameH
-          sheetContext.beginPath()
-          sheetContext.moveTo(marginX - markLen, y)
-          sheetContext.lineTo(marginX, y)
-          sheetContext.moveTo(marginX + gridW, y)
-          sheetContext.lineTo(marginX + gridW + markLen, y)
-          sheetContext.stroke()
-        }
-
-        canvas.width = sheetW + 40
-        canvas.height = sheetH + 40
+        canvas.width = Math.round(layout.sheetW)
+        canvas.height = Math.round(layout.sheetH)
         const context = canvas.getContext('2d')
-        if (!context || cancelled) return
-
+        if (!context) throw new Error('Unable to initialize the export preview canvas.')
         context.fillStyle = '#ffffff'
         context.fillRect(0, 0, canvas.width, canvas.height)
 
-        const baseX = (canvas.width - sheet.width) / 2
-        const baseY = (canvas.height - sheet.height) / 2
-        context.fillRect(baseX - 10, baseY - 10, sheet.width + 20, sheet.height + 20)
-        context.drawImage(sheet, baseX, baseY)
+        cards.forEach((card, index) => {
+          const col = Math.floor(index / layout.rows)
+          const row = index % layout.rows
+          context.drawImage(
+            card,
+            layout.marginX + col * base.frameW + base.offsetX,
+            layout.marginY + row * base.frameH + base.offsetY,
+            base.photoW,
+            base.photoH,
+          )
+        })
 
+        context.strokeStyle = '#000000'
+        context.lineWidth = 2
+        const gridW = usedCols * base.frameW
+        const gridH = usedRows * base.frameH
+        for (let i = 0; i <= usedCols; i += 1) {
+          const x = layout.marginX + i * base.frameW
+          context.beginPath()
+          context.moveTo(x, layout.marginY - layout.markLength)
+          context.lineTo(x, layout.marginY)
+          context.moveTo(x, layout.marginY + gridH)
+          context.lineTo(x, layout.marginY + gridH + layout.markLength)
+          context.stroke()
+        }
+        for (let i = 0; i <= usedRows; i += 1) {
+          const y = layout.marginY + i * base.frameH
+          context.beginPath()
+          context.moveTo(layout.marginX - layout.markLength, y)
+          context.lineTo(layout.marginX, y)
+          context.moveTo(layout.marginX + gridW, y)
+          context.lineTo(layout.marginX + gridW + layout.markLength, y)
+          context.stroke()
+        }
+        setSheetSize({ width: canvas.width, height: canvas.height })
       } catch {
         if (!cancelled) onPreviewError('Unable to build the export preview.')
       }
@@ -247,7 +231,7 @@ export function ExportDialog({
     maxImagesPerPage,
     buildCard,
     onPreviewError,
-    containerSize,
+    format,
     gridOffsetX,
     gridOffsetY,
   ])
@@ -404,14 +388,44 @@ export function ExportDialog({
 
           <div className="export-preview-panel">
             <div className="export-preview-header">
+              <span className="export-preview-meta">Photos on sheet: {photosOnCurrentSheet} / {maxImagesPerPage}</span>
+              <span className="export-preview-divider">•</span>
               <span className="export-preview-meta">Pages: {pageCount}</span>
               <span className="export-preview-divider">•</span>
               <span className="export-preview-meta">Orientation: {orientation}</span>
               <span className="export-preview-divider">•</span>
               <span className="export-preview-meta">Auto rotate: {autoRotate ? 'On' : 'Off'}</span>
+              <div className="export-preview-zoom" aria-label="Preview zoom controls">
+                <button
+                  type="button"
+                  title="Zoom out"
+                  aria-label="Zoom out"
+                  onClick={() => setPreviewZoom((zoom) => Math.max(0.5, Math.round((zoom - 0.25) * 100) / 100))}
+                  disabled={previewZoom <= 0.5}
+                >
+                  −
+                </button>
+                <span>{Math.round(previewZoom * 100)}%</span>
+                <button
+                  type="button"
+                  title="Zoom in"
+                  aria-label="Zoom in"
+                  onClick={() => setPreviewZoom((zoom) => Math.min(4, Math.round((zoom + 0.25) * 100) / 100))}
+                  disabled={previewZoom >= 4}
+                >
+                  +
+                </button>
+                <button type="button" title="Fit preview to window" onClick={() => setPreviewZoom(1)}>Fit</button>
+              </div>
             </div>
-            <div className="export-preview-viewport" ref={containerRef}>
-              <canvas ref={canvasRef} className="export-preview-canvas" />
+            <div className="export-preview-viewport" ref={viewportRef}>
+              <div className="export-preview-stage" style={{ width: stageWidth, height: stageHeight }}>
+                <canvas
+                  ref={canvasRef}
+                  className="export-preview-canvas"
+                  style={{ width: previewWidth, height: previewHeight }}
+                />
+              </div>
             </div>
           </div>
         </div>
