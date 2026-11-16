@@ -9,7 +9,9 @@
   },
   "files": [
     "dist",
-    "dist-electron"
+    "dist-electron",
+    "assets/Polaroid icon.ico",
+    "assets/Polaroid icon.png"
   ],
   "mac": {
     "target": [
@@ -18,6 +20,7 @@
     "artifactName": "${productName}-Mac-${version}-Installer.${ext}"
   },
   "win": {
+    "icon": "assets/Polaroid icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -35,6 +38,7 @@
     "deleteAppDataOnUninstall": false
   },
   "linux": {
+    "icon": "assets/Polaroid icon.png",
     "target": [
       "AppImage"
     ],

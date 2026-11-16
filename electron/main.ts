@@ -26,7 +26,10 @@ export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
+function getAppIconPath() {
+  const iconFile = process.platform === 'win32' ? 'Polaroid icon.ico' : 'Polaroid icon.png'
+  return path.join(app.getAppPath(), 'assets', iconFile)
+}
 
 let win: BrowserWindow | null
 
@@ -1380,6 +1383,7 @@ ipcMain.handle('open-print-preview', async (_event, payload: PrintPreviewPayload
       minWidth: 700,
       minHeight: 520,
       title: 'Polaroid Print Preview',
+      icon: getAppIconPath(),
       backgroundColor: '#20252b',
       webPreferences: {
         preload: path.join(__dirname, 'preload.mjs'),
@@ -1521,7 +1525,7 @@ function buildAppMenu() {
 }
 function createWindow() {
   win = new BrowserWindow({
-    icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
+    icon: getAppIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       webSecurity: false,
