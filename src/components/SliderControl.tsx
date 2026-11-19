@@ -39,7 +39,19 @@ export function SliderControl({
         <label htmlFor={id} onDoubleClick={handleReset} title={defaultValue !== undefined ? 'Double-click to reset' : undefined}>
           {label}
         </label>
-        <span>{display}</span>
+        <div className="slider-value-group">
+          <span>{display}</span>
+          <button
+            type="button"
+            className="slider-reset-button"
+            aria-label={`Reset ${label}`}
+            title={`Reset ${label}`}
+            disabled={defaultValue === undefined || defaultValue === value}
+            onClick={handleReset}
+          >
+            ↺
+          </button>
+        </div>
       </div>
       <input
         id={id}

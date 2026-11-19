@@ -35,6 +35,7 @@ export type SliderKey =
   | 'highlights'
   | 'shadows'
   | 'temperature'
+  | 'tint'
   | 'vibrance'
   | 'saturation'
   | 'hue'
@@ -52,6 +53,7 @@ export const SLIDERS: Array<{ key: SliderKey; label: string; min: number; max: n
   { key: 'highlights', label: 'Highlights', min: 0, max: 2 },
   { key: 'shadows', label: 'Shadows', min: -1, max: 1 },
   { key: 'temperature', label: 'Temperature', min: -1, max: 1 },
+  { key: 'tint', label: 'Tint', min: -1, max: 1 },
   { key: 'vibrance', label: 'Vibrance', min: 0, max: 2 },
   { key: 'saturation', label: 'Saturation', min: 0, max: 2 },
   { key: 'hue', label: 'Hue', min: -1, max: 1 },

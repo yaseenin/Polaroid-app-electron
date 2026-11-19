@@ -512,6 +512,9 @@ button {
 .adjustments-panel {
   width: 300px;
   min-width: 300px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--panel);
   border-left: 1px solid var(--border);
   padding: var(--panel-padding);
@@ -555,8 +558,8 @@ button {
 }
 
 .histogram-actions {
-  display: flex;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--control-spacing);
   margin-bottom: 8px;
 }
@@ -586,6 +589,17 @@ button {
 .compare-preview-button.active {
   background: #20513e;
   border-color: #72bf9e;
+}
+
+.histogram-actions .compare-preview-button {
+  grid-column: 1 / -1;
+}
+
+.histogram-actions > button {
+  min-width: 0;
+  padding-right: 4px;
+  padding-left: 4px;
+  font-size: 11px;
 }
 
 .reset-adjustments-btn {
@@ -621,23 +635,28 @@ button {
 }
 
 .adjustments-clipboard-toolbar {
-  display: flex;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--control-spacing);
   margin-bottom: 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
 
+.adjustments-clipboard-toolbar .paste-crop-btn {
+  grid-column: 1 / -1;
+}
+
 .clipboard-action-btn {
   flex: 1;
+  min-width: 0;
   min-height: var(--input-height);
-  padding: 4px 6px;
+  padding: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  font-size: var(--ui-font-size);
+  gap: 3px;
+  font-size: 11px;
   font-weight: 600;
   border-radius: 6px;
   border: 1px solid var(--input-border);
@@ -857,8 +876,79 @@ button {
 .slider-stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   padding-right: 2px;
+}
+
+.adjustment-group {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.adjustment-group > summary {
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-size: var(--ui-font-size);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.adjustment-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.adjustment-group > summary::before {
+  content: '›';
+  display: inline-block;
+  width: 14px;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.adjustment-group[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.adjustment-group-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 10px 12px;
+}
+
+.white-balance-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: var(--ui-font-size);
+  font-weight: 600;
+}
+
+.white-balance-toolbar > span {
+  grid-column: 1 / -1;
+}
+
+.white-balance-toolbar .auto-correct-button {
+  min-width: 0;
+  padding: 0 6px;
+}
+
+.white-balance-toolbar select {
+  min-width: 0;
+  min-height: var(--input-height);
+  padding: 0 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--panel-elevated);
+  color: var(--text-primary);
+}
+
+.white-balance-toolbar .auto-correct-button.active {
+  background: #20513e;
+  border-color: #72bf9e;
 }
 
 .slider-row {
@@ -874,6 +964,42 @@ button {
   gap: 8px;
   font-size: var(--ui-font-size);
   color: var(--text-primary);
+}
+
+.slider-value-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.slider-reset-button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.slider-reset-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.slider-reset-button:disabled {
+  color: var(--text-muted);
+  opacity: 0.35;
+  cursor: default;
+}
+
+.slider-reset-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .slider-row input[type='range'] {

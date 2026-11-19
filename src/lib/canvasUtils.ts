@@ -162,6 +162,25 @@ export function clampCropRectToCanvas(
   return { x, y, width: Math.min(width, canvasWidth - x), height: Math.min(height, canvasHeight - y) }
 }
 
+export function fitCropRectToAspect(rect: CropRect, aspectRatio: number | null): CropRect {
+  if (!aspectRatio) return rect
+
+  let width = rect.width
+  let height = rect.height
+  if (width / height > aspectRatio) {
+    width = height * aspectRatio
+  } else {
+    height = width / aspectRatio
+  }
+
+  return {
+    x: rect.x + (rect.width - width) / 2,
+    y: rect.y + (rect.height - height) / 2,
+    width,
+    height,
+  }
+}
+
 /** Resizes a crop rectangle by dragging one corner; the opposite corner stays fixed. */
 export function resizeCropRect(
   handle: CropHandle,

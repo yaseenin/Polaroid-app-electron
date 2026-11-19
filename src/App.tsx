@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 
 import './App.css'
 
@@ -29,6 +36,8 @@ import {
   createCroppedCanvas,
   createFitCanvas,
   drawCropOverlay,
+  fitCropRectToAspect,
+  getAspectValue,
   getHistogram,
   getCropRectPixels,
 } from './lib/canvasUtils'
@@ -44,6 +53,13 @@ import {
   type SliderKey,
 } from './lib/editorConstants'
 import { analyzeForPrint } from './lib/printAnalysis'
+import {
+  analyzeWhiteBalance,
+  analyzeWhiteBalanceSample,
+  combineWhiteBalance,
+  WHITE_BALANCE_PRESETS,
+  type WhiteBalancePreset,
+} from './lib/whiteBalance'
 import { readImpositionAutosave, writeImpositionAutosave } from './lib/autosaveStore'
 import {
   createNewImpositionDocument,
@@ -63,6 +79,21 @@ import type {
 
 /** Undo entry. `allSettings` is set by bulk operations (Auto All) so one Undo restores every photo. */
 type HistoryEntry = EditorSnapshot & { allSettings?: Record<number, AdjustmentSettings> }
+
+const ADJUSTMENT_GROUPS: Array<{ label: string; keys: SliderKey[] }> = [
+  {
+    label: 'Light & Tone',
+    keys: ['exposure', 'brightness', 'contrast', 'levelsBlack', 'levelsMid', 'levelsWhite', 'highlights', 'shadows'],
+  },
+  {
+    label: 'Color',
+    keys: ['temperature', 'tint', 'vibrance', 'saturation', 'hue'],
+  },
+  {
+    label: 'Detail',
+    keys: ['sharpen', 'noiseReduction', 'vignette'],
+  },
+]
 
 async function canvasToBytes(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<ArrayBuffer> {
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, quality))
@@ -173,6 +204,7 @@ function App() {
   const [undoStack, setUndoStack] = useState<HistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<HistoryEntry[]>([])
   const [histogram, setHistogram] = useState<number[]>(EMPTY_HISTOGRAM)
+  const [whiteBalancePicking, setWhiteBalancePicking] = useState(false)
 
   /* ---- Refs ---- */
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -262,6 +294,8 @@ function App() {
     handleCropApply,
     handleCropClear,
   } = crop
+  const cropAspectRef = useRef(cropAspect)
+  cropAspectRef.current = cropAspect
 
   const { zoom, panOffset, isPanning, applyZoom, fitPreview, setZoomLevel, panHandlers } = useZoomPan(canvasPanelRef, {
     cropMode,
@@ -670,7 +704,10 @@ function App() {
     setPhotos(restoredPhotos)
     setSettingsByPhoto(
       Object.fromEntries(
-        entries.map(({ saved, photo }) => [photo.id, saved.settings ?? project.settings ?? NEUTRAL_SETTINGS]),
+        entries.map(({ saved, photo }) => [
+          photo.id,
+          { ...NEUTRAL_SETTINGS, ...(saved.settings ?? project.settings ?? {}) },
+        ]),
       ),
     )
     setCropAppliedByPhoto(Object.fromEntries(entries.map(({ saved, photo }) => [photo.id, saved.cropApplied ?? null])))
@@ -861,6 +898,106 @@ function App() {
     }
   }
 
+  const handleAutoWhiteBalance = async () => {
+    if (!activePhoto) return
+    const photo = activePhoto
+    setStatus(`Analyzing white balance for ${photo.name}…`)
+
+    try {
+      const image = await loadImageResource(photo.url)
+      const whiteBalance = analyzeWhiteBalance(image)
+      recordHistory()
+      setSettingsByPhoto((settings) => ({
+        ...settings,
+        [photo.id]: { ...(settings[photo.id] ?? NEUTRAL_SETTINGS), ...whiteBalance },
+      }))
+      setStatus(`Auto white balance applied to ${photo.name}`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Auto white balance failed.')
+    }
+  }
+
+  const handleWhiteBalancePreset = (presetId: WhiteBalancePreset) => {
+    setWhiteBalancePicking(false)
+    if (presetId === 'auto') {
+      void handleAutoWhiteBalance()
+      return
+    }
+
+    const preset = WHITE_BALANCE_PRESETS.find(({ id }) => id === presetId)
+    if (!activePhoto || !preset || !('temperature' in preset)) return
+
+    recordHistory()
+    setSettingsByPhoto((settings) => ({
+      ...settings,
+      [activePhoto.id]: {
+        ...(settings[activePhoto.id] ?? NEUTRAL_SETTINGS),
+        temperature: preset.temperature,
+        tint: preset.tint,
+      },
+    }))
+    setStatus(`${preset.label} white balance applied to ${activePhoto.name}`)
+  }
+
+  const toggleWhiteBalancePicker = () => {
+    if (!activePhoto) return
+    if (cropMode) {
+      setStatus('Exit crop mode before using the white-balance eyedropper.')
+      return
+    }
+    const next = !whiteBalancePicking
+    setWhiteBalancePicking(next)
+    setStatus(next ? 'Click a neutral gray or white midtone in the photo.' : 'White-balance eyedropper cancelled.')
+  }
+
+  const handleToggleCropMode = () => {
+    setWhiteBalancePicking(false)
+    toggleCropMode()
+  }
+
+  const handleWhiteBalancePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!whiteBalancePicking || event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const photo = activePhoto
+    if (!photo) return
+    const canvas = event.currentTarget
+    const bounds = canvas.getBoundingClientRect()
+    const x = Math.floor((event.clientX - bounds.left) * canvas.width / bounds.width)
+    const y = Math.floor((event.clientY - bounds.top) * canvas.height / bounds.height)
+
+    try {
+      const pixel = canvas.getContext('2d')?.getImageData(
+        clamp(x, 0, canvas.width - 1),
+        clamp(y, 0, canvas.height - 1),
+        1,
+        1,
+      ).data
+      if (!pixel) throw new Error('Unable to sample the selected pixel.')
+
+      const correction = analyzeWhiteBalanceSample(pixel[0], pixel[1], pixel[2])
+      const current = settingsByPhoto[photo.id] ?? NEUTRAL_SETTINGS
+      const whiteBalance = combineWhiteBalance(
+        { temperature: current.temperature, tint: current.tint ?? 0 },
+        correction,
+      )
+      recordHistory()
+      setSettingsByPhoto((settings) => ({
+        ...settings,
+        [photo.id]: { ...(settings[photo.id] ?? NEUTRAL_SETTINGS), ...whiteBalance },
+      }))
+      setWhiteBalancePicking(false)
+      setStatus(`White balance sampled from ${photo.name}`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Unable to sample white balance.')
+    }
+  }
+
+  useEffect(() => {
+    setWhiteBalancePicking(false)
+  }, [activePhoto?.id])
+
   /* ---- Preview rendering ---- */
   useEffect(() => {
     if (!photos.length) {
@@ -907,9 +1044,9 @@ function App() {
 
           const target = previewCanvasRef.current
           if (!target) return
-          processedPreviewCanvasRef.current = processed
+          const display = cropApplied ? createCroppedCanvas(processed, cropApplied) : processed
+          processedPreviewCanvasRef.current = display
 
-          const display = !cropMode && cropApplied ? createCroppedCanvas(processed, cropApplied) : processed
           const scale = Math.min(MAX_PREVIEW_CANVAS / display.width, MAX_PREVIEW_CANVAS / display.height, 1)
           target.width = Math.max(1, Math.round(display.width * scale))
           target.height = Math.max(1, Math.round(display.height * scale))
@@ -922,9 +1059,11 @@ function App() {
           context.drawImage(display, 0, 0, target.width, target.height)
 
           if (cropMode) {
-            const rect = cropRectRef.current ?? { x: 0, y: 0, width: target.width, height: target.height }
-            if (!cropRectRef.current) setCropRectFor(activePhoto.id, rect)
-            drawCropOverlay(target, processed, rect, true, cropAspect)
+            const activeCropAspect = cropAspectRef.current
+            const fullRect = { x: 0, y: 0, width: target.width, height: target.height }
+            const rect = cropRectRef.current ?? fitCropRectToAspect(fullRect, getAspectValue(activeCropAspect))
+            if (!cropRectRef.current) setCropRectFor(activePhoto.id, rect, fullRect)
+            drawCropOverlay(target, display, rect, true, activeCropAspect)
           }
 
           setHistogram(getHistogram(target))
@@ -1157,6 +1296,9 @@ function App() {
     if (event.key === 'Escape') {
       if (showExportDialog) {
         setShowExportDialog(false)
+      } else if (whiteBalancePicking) {
+        setWhiteBalancePicking(false)
+        setStatus('White-balance eyedropper cancelled.')
       } else if (cropMode) {
         setCropMode(false)
         if (activePhoto) setCropRectFor(activePhoto.id, null)
@@ -1179,12 +1321,13 @@ function App() {
     if (!mod && !isTyping && !isRange && !showExportDialog) {
       if (key === 'i') {
         event.preventDefault()
-        void handleOpenNativeDialog()
+        if (event.shiftKey) void handleOpenNativeDialog()
+        else toggleWhiteBalancePicker()
         return
       }
       if (key === 'c') {
         event.preventDefault()
-        toggleCropMode()
+        handleToggleCropMode()
         return
       }
       if (key === 'r') {
@@ -1294,8 +1437,8 @@ function App() {
         <div className="workspace-shell">
           <aside className="tool-rail">
             <div className="tool-group">
-              <button title="Open Images" className="tool-button" aria-label="Open Images" onClick={handleOpenNativeDialog}>📂</button>
-              <button title="Crop (Esc to leave)" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={toggleCropMode}>◧</button>
+              <button title="Open Images (Shift+I)" className="tool-button" aria-label="Open Images" onClick={handleOpenNativeDialog}>📂</button>
+              <button title="Crop (Esc to leave)" className={`tool-button ${cropMode ? 'active' : ''}`} aria-label="Crop" aria-pressed={cropMode} onClick={handleToggleCropMode}>◧</button>
               <div className="tool-separator"></div>
               <button title="Undo (Ctrl+Z)" className="tool-button" aria-label="Undo" onClick={handleUndo} disabled={undoStack.length === 0}>↶</button>
               <button title="Redo (Ctrl+Shift+Z)" className="tool-button" aria-label="Redo" onClick={handleRedo} disabled={redoStack.length === 0}>↷</button>
@@ -1349,7 +1492,17 @@ function App() {
             <div
               className="canvas-panel"
               ref={canvasPanelRef}
-              style={{ cursor: cropMode ? 'crosshair' : isPanning ? 'grabbing' : zoom > 1 ? 'grab' : 'default' }}
+              style={{
+                cursor: whiteBalancePicking
+                  ? 'crosshair'
+                  : cropMode
+                    ? 'crosshair'
+                    : isPanning
+                      ? 'grabbing'
+                      : zoom > 1
+                        ? 'grab'
+                        : 'default',
+              }}
               {...panHandlers}
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => {
@@ -1359,11 +1512,20 @@ function App() {
             >
               <canvas
                 ref={previewCanvasRef}
-                className={`preview-canvas ${cropMode ? 'crop-enabled' : ''}`}
+                className={`preview-canvas ${cropMode ? 'crop-enabled' : ''} ${whiteBalancePicking ? 'white-balance-picker' : ''}`}
                 style={{
-                  cursor: cropMode ? cropCursor : isPanning ? 'grabbing' : zoom > 1 ? 'grab' : 'default',
+                  cursor: whiteBalancePicking
+                    ? 'crosshair'
+                    : cropMode
+                      ? cropCursor
+                      : isPanning
+                        ? 'grabbing'
+                        : zoom > 1
+                          ? 'grab'
+                          : 'default',
                   transform: `translate(calc(-50% + ${panOffset.x}px), calc(-50% + ${panOffset.y}px)) scale(${zoom})`,
                 }}
+                onPointerDown={handleWhiteBalancePointerDown}
                 {...canvasHandlers}
               />
             </div>
@@ -1503,18 +1665,55 @@ function App() {
             </div>
 
             <div className="slider-stack">
-              {SLIDERS.map(({ key, label, min, max }) => (
-                <SliderControl
-                  key={key}
-                  label={label}
-                  min={min}
-                  max={max}
-                  step={0.01}
-                  value={activeSettings[key]}
-                  defaultValue={NEUTRAL_SETTINGS[key]}
-                  onChange={(value) => updateSetting(key, value)}
-                  onInteractionStart={() => recordHistory()}
-                />
+              {ADJUSTMENT_GROUPS.map((group) => (
+                <details className="adjustment-group" key={group.label} open={group.label !== 'Detail'}>
+                  <summary>{group.label}</summary>
+                  <div className="adjustment-group-controls">
+                    {SLIDERS.filter(({ key }) => group.keys.includes(key)).map(({ key, label, min, max }) => (
+                      <Fragment key={key}>
+                        {key === 'temperature' ? (
+                          <div className="white-balance-toolbar">
+                            <span>White Balance</span>
+                            <select
+                              aria-label="White balance preset"
+                              value=""
+                              disabled={!activePhoto}
+                              onChange={(event) => {
+                                const preset = WHITE_BALANCE_PRESETS.find(({ id }) => id === event.target.value)
+                                if (preset) handleWhiteBalancePreset(preset.id)
+                              }}
+                            >
+                              <option value="" disabled>Presets</option>
+                              {WHITE_BALANCE_PRESETS.map(({ id, label }) => (
+                                <option key={id} value={id}>{label}</option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className={`auto-correct-button ${whiteBalancePicking ? 'active' : ''}`}
+                              onClick={toggleWhiteBalancePicker}
+                              disabled={!activePhoto}
+                              aria-pressed={whiteBalancePicking}
+                              title="Pick a neutral gray or white point (I)"
+                            >
+                              Eyedropper
+                            </button>
+                          </div>
+                        ) : null}
+                        <SliderControl
+                          label={label}
+                          min={min}
+                          max={max}
+                          step={0.01}
+                          value={activeSettings[key]}
+                          defaultValue={NEUTRAL_SETTINGS[key]}
+                          onChange={(value) => updateSetting(key, value)}
+                          onInteractionStart={() => recordHistory()}
+                        />
+                      </Fragment>
+                    ))}
+                  </div>
+                </details>
               ))}
             </div>
           </aside>

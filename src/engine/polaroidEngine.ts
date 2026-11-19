@@ -18,6 +18,7 @@ export type AdjustmentSettings = {
   sharpen: number
   noiseReduction: number
   temperature: number
+  tint: number
   vignette: number
   fillBlur?: boolean
 }
@@ -38,6 +39,7 @@ export type AdjustmentOperation = {
   | 'sharpen'
   | 'noiseReduction'
   | 'temperature'
+  | 'tint'
   | 'vignette'
   value: number
 }
@@ -68,6 +70,7 @@ export const defaultSettings: AdjustmentSettings = {
   sharpen: 0,
   noiseReduction: 0,
   temperature: 0,
+  tint: 0,
   vignette: 0,
   fillBlur: false,
 }
@@ -126,6 +129,7 @@ export function buildAdjustmentOperations(settings: AdjustmentSettings): Adjustm
   if (settings.vibrance !== 1) operations.push({ type: 'vibrance', value: settings.vibrance })
   if (settings.hue !== 0) operations.push({ type: 'hue', value: settings.hue })
   if (settings.temperature !== 0) operations.push({ type: 'temperature', value: settings.temperature })
+  if ((settings.tint ?? 0) !== 0) operations.push({ type: 'tint', value: settings.tint ?? 0 })
   if (settings.sharpen > 0) operations.push({ type: 'sharpen', value: settings.sharpen })
   if (settings.noiseReduction > 0) operations.push({ type: 'noiseReduction', value: settings.noiseReduction })
   if (settings.vignette > 0) operations.push({ type: 'vignette', value: settings.vignette })
@@ -356,6 +360,11 @@ export function applyProcessingToPixels(source: Uint8ClampedArray, width: number
   const tempAmount = settings.temperature * 0.3
   const tempR = 1 + tempAmount
   const tempB = 1 - tempAmount
+  const tint = settings.tint ?? 0
+  const hasTint = tint !== 0
+  const tintAmount = tint * 0.2
+  const tintRB = 1 + tintAmount
+  const tintG = 1 - tintAmount
 
   const hasVignette = settings.vignette > 0
   const vignetteStrength = settings.vignette
@@ -461,6 +470,12 @@ export function applyProcessingToPixels(source: Uint8ClampedArray, width: number
       if (hasTemp) {
         r = clamp01(r * tempR)
         b = clamp01(b * tempB)
+      }
+
+      if (hasTint) {
+        r = clamp01(r * tintRB)
+        g = clamp01(g * tintG)
+        b = clamp01(b * tintRB)
       }
 
       if (hasVignette) {
