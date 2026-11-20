@@ -1,0 +1,28 @@
+You already have a solid editing foundation: batch photo loading, crop controls, white balance, RGB histogram, adjustments, and print/imposition workflows. To make it feel production-ready, I’d prioritize:
+
+### Highest priority
+1. **Protect users’ work:** reliable autosave and crash recovery, unsaved-change warnings, and clear handling of failed imports or exports.
+2. **Make batch work faster:** copy/paste selected adjustments, apply a preset to multiple photos, and show progress with cancel for long operations.
+3. **Improve export confidence:** saved export presets, batch naming rules, output-size and resolution warnings, and a final preview of print margins and crop.
+4. **Finish the core interactions:** consistent keyboard shortcuts, visible shortcut hints, undo/redo for every edit, and clear disabled/loading/error states.
+
+### Editing and workflow upgrades
+- Add crop guides (thirds, center, golden ratio), straighten, and custom aspect ratios.
+- Add a history panel and saveable user presets.
+- Support star ratings or flags to help sort large photo batches.
+- Offer side-by-side or split-view comparison with the original.
+- Consider ICC color-profile handling and print soft-proofing if color accuracy is a key use case.
+
+### Accessibility and polish
+- Ensure all controls work by keyboard and have clear focus states and screen-reader labels.
+- Add tooltips for less-obvious controls, plus a searchable shortcut/help panel.
+- Make long lists, dialogs, and the adjustment panel behave well at smaller window sizes.
+- Use consistent terminology, confirmation prompts for destructive actions, and actionable error messages.
+
+### Production tooling
+- Add automated tests for crop geometry, image processing, export, and project recovery.
+- Run lint, type-check, tests, and packaged-app smoke tests in CI.
+- Plan for signed installers, platform-specific packaging, and a safe auto-update process.
+- Consider opt-in crash diagnostics that avoid collecting image content or other private data.
+
+**Suggested order:** work recovery and export reliability first, then batch workflow, then accessibility and release automation. These reduce the biggest risks for people editing many photos at once.

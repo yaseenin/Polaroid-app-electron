@@ -1,6 +1,6 @@
 import { defaultSettings, type AdjustmentSettings } from '../engine/polaroidEngine'
 import type { CropAspect } from '../types'
-import { HISTOGRAM_BUCKETS } from './canvasUtils'
+import { createEmptyHistogram } from './canvasUtils'
 
 /** Explicit neutral values: no adjustment at all. New photos start here, and "Reset" returns here.
  *  Use this (not `defaultSettings`) anywhere a "no adjustment" fallback is needed: `defaultSettings`
@@ -62,7 +62,7 @@ export const SLIDERS: Array<{ key: SliderKey; label: string; min: number; max: n
   { key: 'vignette', label: 'Vignette', min: 0, max: 1 },
 ]
 
-export const CROP_ASPECTS: CropAspect[] = ['Free', 'Square', 'Mini', 'Wide']
+export const CROP_ASPECTS: CropAspect[] = ['Free', 'Square', 'Mini', 'Wide', 'Custom']
 
 /** Longest side of the preview proxy. Higher = sharper preview but slower slider response on big photos. */
 export const MAX_PREVIEW_DIM = 2000
@@ -73,7 +73,7 @@ export const MAX_PREVIEW_CANVAS = 1600
 export const MIN_ZOOM = 0.25
 export const MAX_ZOOM = 3
 
-export const EMPTY_HISTOGRAM: number[] = new Array(HISTOGRAM_BUCKETS).fill(0)
+export const EMPTY_HISTOGRAM = createEmptyHistogram()
 
 export const AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 /** Written into the folder the photos were imported from. */

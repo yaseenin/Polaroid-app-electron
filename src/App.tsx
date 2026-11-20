@@ -35,11 +35,12 @@ import {
   createBlurFillCanvas,
   createCroppedCanvas,
   createFitCanvas,
+  createRotatedCanvas,
   drawCropOverlay,
   fitCropRectToAspect,
   getAspectValue,
+  getCroppedCanvasDimensions,
   getHistogram,
-  getCropRectPixels,
 } from './lib/canvasUtils'
 import {
   CROP_ASPECTS,
@@ -80,6 +81,17 @@ import type {
 /** Undo entry. `allSettings` is set by bulk operations (Auto All) so one Undo restores every photo. */
 type HistoryEntry = EditorSnapshot & { allSettings?: Record<number, AdjustmentSettings> }
 
+function buildHistogramAreaPath(values: number[]): string {
+  if (values.length === 0) return ''
+  const last = Math.max(1, values.length - 1)
+  const points = values.map((value, index) => {
+    const x = (index / last) * 100
+    const y = 100 - value
+    return `${x.toFixed(2)},${y.toFixed(2)}`
+  })
+  return `M0 100 L${points.join(' L')} L100 100 Z`
+}
+
 const ADJUSTMENT_GROUPS: Array<{ label: string; keys: SliderKey[] }> = [
   {
     label: 'Light & Tone',
@@ -102,15 +114,10 @@ async function canvasToBytes(canvas: HTMLCanvasElement, mime: string, quality: n
 }
 
 function getCroppedArtworkAspectRatio(widthPx: number, heightPx: number, crop: CropApplied | null): number {
-  const cropPixels = crop
-    ? getCropRectPixels(widthPx, heightPx, crop)
-    : { width: widthPx, height: heightPx, rotation: 0 }
-  const rotation = cropPixels.rotation * Math.PI / 180
-  const cosine = Math.abs(Math.cos(rotation))
-  const sine = Math.abs(Math.sin(rotation))
-  const rotatedWidth = cropPixels.width * cosine + cropPixels.height * sine
-  const rotatedHeight = cropPixels.width * sine + cropPixels.height * cosine
-  return rotatedWidth / Math.max(0.001, rotatedHeight)
+  const dimensions = crop
+    ? getCroppedCanvasDimensions(widthPx, heightPx, crop)
+    : { width: widthPx, height: heightPx }
+  return dimensions.width / dimensions.height
 }
 
 async function buildSheetPages(
@@ -203,8 +210,21 @@ function App() {
   const [lastOutputDir, setLastOutputDir] = useState<string | null>(null)
   const [undoStack, setUndoStack] = useState<HistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<HistoryEntry[]>([])
-  const [histogram, setHistogram] = useState<number[]>(EMPTY_HISTOGRAM)
+  const [histogram, setHistogram] = useState(EMPTY_HISTOGRAM)
   const [whiteBalancePicking, setWhiteBalancePicking] = useState(false)
+  const [cropContextMenu, setCropContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [customAspectWidth, setCustomAspectWidth] = useState('4')
+  const [customAspectHeight, setCustomAspectHeight] = useState('3')
+  const parsedCustomAspectWidth = Number(customAspectWidth)
+  const parsedCustomAspectHeight = Number(customAspectHeight)
+  const customAspectValid =
+    Number.isFinite(parsedCustomAspectWidth) &&
+    Number.isFinite(parsedCustomAspectHeight) &&
+    parsedCustomAspectWidth > 0 &&
+    parsedCustomAspectHeight > 0
+  const customAspectRatio = customAspectValid
+    ? parsedCustomAspectWidth / parsedCustomAspectHeight
+    : 4 / 3
 
   /* ---- Refs ---- */
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -270,6 +290,7 @@ function App() {
     processedPreviewCanvasRef,
     cropAppliedByPhoto,
     setCropAppliedByPhoto,
+    customAspectRatio,
     recordHistory: () => recordHistoryRef.current(),
     setStatus,
   })
@@ -281,6 +302,10 @@ function App() {
     setCropAspect,
     cropRotation,
     setCropRotation,
+    cropStraighten,
+    setCropStraighten,
+    cropGuide,
+    setCropGuide,
     cropCursor,
     cropRect,
     cropRectRef,
@@ -296,6 +321,12 @@ function App() {
   } = crop
   const cropAspectRef = useRef(cropAspect)
   cropAspectRef.current = cropAspect
+  const cropStraightenRef = useRef(cropStraighten)
+  cropStraightenRef.current = cropStraighten
+  const cropGuideRef = useRef(cropGuide)
+  cropGuideRef.current = cropGuide
+  const customAspectRatioRef = useRef(customAspectRatio)
+  customAspectRatioRef.current = customAspectRatio
 
   const { zoom, panOffset, isPanning, applyZoom, fitPreview, setZoomLevel, panHandlers } = useZoomPan(canvasPanelRef, {
     cropMode,
@@ -952,6 +983,7 @@ function App() {
 
   const handleToggleCropMode = () => {
     setWhiteBalancePicking(false)
+    setCropContextMenu(null)
     toggleCropMode()
   }
 
@@ -1046,27 +1078,41 @@ function App() {
           if (!target) return
           const display = cropApplied ? createCroppedCanvas(processed, cropApplied) : processed
           processedPreviewCanvasRef.current = display
+          const cropDisplay = cropMode
+            ? createRotatedCanvas(display, cropStraightenRef.current, true)
+            : display
 
-          const scale = Math.min(MAX_PREVIEW_CANVAS / display.width, MAX_PREVIEW_CANVAS / display.height, 1)
-          target.width = Math.max(1, Math.round(display.width * scale))
-          target.height = Math.max(1, Math.round(display.height * scale))
+          const scale = Math.min(MAX_PREVIEW_CANVAS / cropDisplay.width, MAX_PREVIEW_CANVAS / cropDisplay.height, 1)
+          target.width = Math.max(1, Math.round(cropDisplay.width * scale))
+          target.height = Math.max(1, Math.round(cropDisplay.height * scale))
 
           const context = target.getContext('2d')
           if (!context) return
           context.clearRect(0, 0, target.width, target.height)
           context.imageSmoothingEnabled = true
           context.imageSmoothingQuality = 'high'
-          context.drawImage(display, 0, 0, target.width, target.height)
+          context.drawImage(cropDisplay, 0, 0, target.width, target.height)
 
           if (cropMode) {
             const activeCropAspect = cropAspectRef.current
             const fullRect = { x: 0, y: 0, width: target.width, height: target.height }
-            const rect = cropRectRef.current ?? fitCropRectToAspect(fullRect, getAspectValue(activeCropAspect))
+            const rect = cropRectRef.current ?? fitCropRectToAspect(
+              fullRect,
+              getAspectValue(activeCropAspect, customAspectRatioRef.current),
+            )
             if (!cropRectRef.current) setCropRectFor(activePhoto.id, rect, fullRect)
-            drawCropOverlay(target, display, rect, true, activeCropAspect)
+            drawCropOverlay(
+              target,
+              cropDisplay,
+              rect,
+              true,
+              activeCropAspect,
+              customAspectRatioRef.current,
+              cropGuideRef.current,
+            )
           }
 
-          setHistogram(getHistogram(target))
+          setHistogram(getHistogram(display))
         })
         .catch((error) => {
           if (cancelled || isSuperseded(error)) return
@@ -1261,6 +1307,7 @@ function App() {
     const inputType = (target as HTMLInputElement | null)?.type
     const isRange = tag === 'INPUT' && inputType === 'range'
     const isTyping = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !isRange && inputType !== 'checkbox')
+    const isButtonTarget = target instanceof Element && target.closest('button') !== null
     const mod = event.ctrlKey || event.metaKey
     const key = event.key.toLowerCase()
 
@@ -1296,6 +1343,8 @@ function App() {
     if (event.key === 'Escape') {
       if (showExportDialog) {
         setShowExportDialog(false)
+      } else if (cropContextMenu) {
+        setCropContextMenu(null)
       } else if (whiteBalancePicking) {
         setWhiteBalancePicking(false)
         setStatus('White-balance eyedropper cancelled.')
@@ -1303,6 +1352,23 @@ function App() {
         setCropMode(false)
         if (activePhoto) setCropRectFor(activePhoto.id, null)
       }
+      return
+    }
+
+    if (
+      event.key === 'Enter' &&
+      cropMode &&
+      cropRect &&
+      !cropContextMenu &&
+      !mod &&
+      !isTyping &&
+      !isRange &&
+      !showExportDialog &&
+      !isButtonTarget &&
+      (cropAspect !== 'Custom' || customAspectValid)
+    ) {
+      event.preventDefault()
+      handleCropApply()
       return
     }
 
@@ -1416,7 +1482,7 @@ function App() {
       onClose={handleCloseImpositionBuilder}
     />
   ) : (
-    <div className="app dark">
+    <div className="app dark" onClick={() => cropContextMenu && setCropContextMenu(null)}>
       <input
         ref={fileInputRef}
         type="file"
@@ -1469,12 +1535,73 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  {cropAspect === 'Custom' ? (
+                    <div className="crop-custom-aspect">
+                      <label>
+                        W
+                        <input
+                          type="number"
+                          min="1"
+                          step="any"
+                          aria-label="Custom crop ratio width"
+                          aria-invalid={!customAspectValid}
+                          value={customAspectWidth}
+                          onChange={(event) => setCustomAspectWidth(event.target.value)}
+                        />
+                      </label>
+                      <span>:</span>
+                      <label>
+                        H
+                        <input
+                          type="number"
+                          min="1"
+                          step="any"
+                          aria-label="Custom crop ratio height"
+                          aria-invalid={!customAspectValid}
+                          value={customAspectHeight}
+                          onChange={(event) => setCustomAspectHeight(event.target.value)}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                  <label className="crop-guide-control">
+                    Guides
+                    <select aria-label="Crop guide" value={cropGuide} onChange={(event) => setCropGuide(event.target.value as typeof cropGuide)}>
+                      <option value="Thirds">Thirds</option>
+                      <option value="Center">Center</option>
+                      <option value="Golden Ratio">Golden Ratio</option>
+                      <option value="None">None</option>
+                    </select>
+                  </label>
                   <div className="crop-rotate-row">
                     <button type="button" title="Rotate left" className="ghost-button" onClick={() => handleCropRotate(-90)}>↺</button>
                     <button type="button" title="Rotate right" className="ghost-button" onClick={() => handleCropRotate(90)}>↻</button>
                     <span title="Rotation is shown after you press Apply">{cropRotation}°</span>
                   </div>
-                  {cropRect ? <button type="button" title="Apply crop" className="ghost-button" onClick={handleCropApply}>Apply</button> : null}
+                  <label className="crop-straighten-control">
+                    Straighten
+                    <input
+                      type="range"
+                      min="-45"
+                      max="45"
+                      step="0.1"
+                      aria-label="Straighten crop"
+                      value={cropStraighten}
+                      onChange={(event) => setCropStraighten(Number(event.target.value))}
+                    />
+                    <output>{cropStraighten.toFixed(1)}°</output>
+                  </label>
+                  {cropRect ? (
+                    <button
+                      type="button"
+                      title="Apply crop"
+                      className="ghost-button"
+                      onClick={handleCropApply}
+                      disabled={cropAspect === 'Custom' && !customAspectValid}
+                    >
+                      Apply
+                    </button>
+                  ) : null}
                   {cropRect || cropApplied ? <button type="button" title="Clear crop" className="ghost-button" onClick={handleCropClear}>Clear</button> : null}
                 </div>
               ) : null}
@@ -1526,9 +1653,48 @@ function App() {
                   transform: `translate(calc(-50% + ${panOffset.x}px), calc(-50% + ${panOffset.y}px)) scale(${zoom})`,
                 }}
                 onPointerDown={handleWhiteBalancePointerDown}
+                onContextMenu={(event) => {
+                  if (!cropMode || !activePhoto) return
+                  event.preventDefault()
+                  const menuWidth = 176
+                  const menuHeight = 190
+                  const x = Number.isFinite(event.clientX) ? event.clientX : window.innerWidth / 2
+                  const y = Number.isFinite(event.clientY) ? event.clientY : window.innerHeight / 2
+                  setCropContextMenu({
+                    x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
+                    y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
+                  })
+                }}
                 {...canvasHandlers}
               />
             </div>
+
+            {cropMode && cropContextMenu ? (
+              <div
+                className="crop-context-menu"
+                role="menu"
+                aria-label="Crop aspect ratio"
+                style={{ left: cropContextMenu.x, top: cropContextMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <span className="crop-context-menu-title">Crop ratio</span>
+                {CROP_ASPECTS.map((aspect) => (
+                  <button
+                    key={aspect}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={cropAspect === aspect}
+                    className={cropAspect === aspect ? 'active' : ''}
+                    onClick={() => {
+                      setCropAspect(aspect)
+                      setCropContextMenu(null)
+                    }}
+                  >
+                    {aspect}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div className="preview-controls">
               <button title="Rotate Left" className="preview-btn" aria-label="Rotate Left" onClick={() => handleRotatePhoto(-90)} disabled={!activePhoto}>↺</button>
@@ -1575,10 +1741,35 @@ function App() {
               <div className="meta-row">
                 <span>{operationSummary.length} active</span>
               </div>
-              <div className="histogram" aria-label="Histogram">
-                {histogram.map((value, index) => (
-                  <span key={index} className="histogram-bar" style={{ height: `${Math.max(8, value)}%` }} />
-                ))}
+              <div className="histogram-title-row">
+                <span>Histogram</span>
+                <div className="histogram-legend" aria-hidden="true">
+                  <span className="histogram-legend-red">R</span>
+                  <span className="histogram-legend-green">G</span>
+                  <span className="histogram-legend-blue">B</span>
+                </div>
+              </div>
+              <div
+                className="histogram"
+                role="img"
+                aria-label="RGB histogram showing shadow, midtone, and highlight distribution"
+              >
+                <svg
+                  className="histogram-chart"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path className="histogram-grid" d="M0 25H100 M0 50H100 M0 75H100 M25 0V100 M50 0V100 M75 0V100" />
+                  <path className="histogram-area histogram-red" d={buildHistogramAreaPath(histogram.red)} />
+                  <path className="histogram-area histogram-green" d={buildHistogramAreaPath(histogram.green)} />
+                  <path className="histogram-area histogram-blue" d={buildHistogramAreaPath(histogram.blue)} />
+                </svg>
+                <div className="histogram-axis" aria-hidden="true">
+                  <span>0</span>
+                  <span>128</span>
+                  <span>255</span>
+                </div>
               </div>
               <div className="histogram-actions">
                 <button

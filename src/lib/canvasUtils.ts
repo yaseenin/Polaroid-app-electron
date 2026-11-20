@@ -1,4 +1,4 @@
-import type { CropApplied, CropAspect, CropHandle, CropRect } from '../types'
+import type { CropApplied, CropAspect, CropGuide, CropHandle, CropRect, CropStep } from '../types'
 
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -6,7 +6,7 @@ export const clamp = (value: number, min: number, max: number) => Math.min(max, 
 /* Aspect ratios                                                       */
 /* ------------------------------------------------------------------ */
 
-export function getAspectValue(aspect: CropAspect): number | null {
+export function getAspectValue(aspect: CropAspect, customAspectRatio: number | null = null): number | null {
   switch (aspect) {
     case 'Square':
       return 1
@@ -14,6 +14,10 @@ export function getAspectValue(aspect: CropAspect): number | null {
       return 68 / 91
     case 'Wide':
       return 1.234
+    case 'Custom':
+      return customAspectRatio && Number.isFinite(customAspectRatio) && customAspectRatio > 0
+        ? customAspectRatio
+        : null
     default:
       return null
   }
@@ -233,6 +237,8 @@ export function drawCropOverlay(
   rect: CropRect | null,
   enabled: boolean,
   aspect: CropAspect,
+  customAspectRatio: number | null = null,
+  guide: CropGuide = 'Thirds',
 ) {
   const context = targetCanvas.getContext('2d')
   if (!context) return
@@ -244,7 +250,41 @@ export function drawCropOverlay(
 
   if (!enabled || !rect) return
 
-  const next = clampCropRectToCanvas(rect, targetCanvas.width, targetCanvas.height, getAspectValue(aspect))
+  const next = clampCropRectToCanvas(
+    rect,
+    targetCanvas.width,
+    targetCanvas.height,
+    getAspectValue(aspect, customAspectRatio),
+  )
+
+  const guidePositions = {
+    Thirds: [1 / 3, 2 / 3],
+    Center: [1 / 2],
+    'Golden Ratio': [(1 - 1 / Math.sqrt(5)) / 2, (1 + 1 / Math.sqrt(5)) / 2],
+    None: [],
+  }[guide]
+
+  if (guidePositions.length > 0) {
+    context.save()
+    context.beginPath()
+    context.rect(next.x, next.y, next.width, next.height)
+    context.clip()
+    context.strokeStyle = 'rgba(255, 255, 255, 0.8)'
+    context.lineWidth = 1
+    context.shadowColor = 'rgba(0, 0, 0, 0.7)'
+    context.shadowBlur = 2
+    guidePositions.forEach((position) => {
+      const x = next.x + next.width * position
+      const y = next.y + next.height * position
+      context.beginPath()
+      context.moveTo(x, next.y)
+      context.lineTo(x, next.y + next.height)
+      context.moveTo(next.x, y)
+      context.lineTo(next.x + next.width, y)
+      context.stroke()
+    })
+    context.restore()
+  }
 
   context.strokeStyle = '#67c8ff'
   context.lineWidth = 2
@@ -289,9 +329,9 @@ export function getCropRectPixels(
   }
 }
 
-export function createCroppedCanvas(
+function cropCanvasToRect(
   sourceCanvas: HTMLCanvasElement,
-  crop: { x: number; y: number; width: number; height: number; rotation?: number },
+  crop: Pick<CropStep, 'x' | 'y' | 'width' | 'height'>,
 ): HTMLCanvasElement {
   const pixelRect = getCropRectPixels(sourceCanvas.width, sourceCanvas.height, crop)
   const cropped = document.createElement('canvas')
@@ -315,26 +355,104 @@ export function createCroppedCanvas(
     cropped.width,
     cropped.height,
   )
+  return cropped
+}
 
-  const rotation = (pixelRect.rotation * Math.PI) / 180
-  if (Math.abs(rotation) < 0.0001) return cropped
+function getExpandedRotationDimensions(width: number, height: number, rotation: number) {
+  const radians = (rotation * Math.PI) / 180
+  const sinValue = Math.abs(Math.sin(radians))
+  const cosValue = Math.abs(Math.cos(radians))
+  const sin = sinValue < 1e-10 ? 0 : sinValue
+  const cos = cosValue < 1e-10 ? 0 : cosValue
+  return {
+    width: Math.max(1, Math.ceil(width * cos + height * sin)),
+    height: Math.max(1, Math.ceil(width * sin + height * cos)),
+  }
+}
 
+function rotateCanvasExpanded(sourceCanvas: HTMLCanvasElement, rotation: number): HTMLCanvasElement {
+  if (Math.abs(rotation) < 0.0001) return sourceCanvas
+  const dimensions = getExpandedRotationDimensions(sourceCanvas.width, sourceCanvas.height, rotation)
   const rotated = document.createElement('canvas')
-  const sin = Math.abs(Math.sin(rotation))
-  const cos = Math.abs(Math.cos(rotation))
-  rotated.width = Math.ceil(cropped.width * cos + cropped.height * sin)
-  rotated.height = Math.ceil(cropped.width * sin + cropped.height * cos)
+  rotated.width = dimensions.width
+  rotated.height = dimensions.height
 
-  const rotatedContext = rotated.getContext('2d', { alpha: false })
-  if (!rotatedContext) return cropped
+  const context = rotated.getContext('2d', { alpha: false })
+  if (!context) return sourceCanvas
 
-  rotatedContext.fillStyle = '#ffffff'
-  rotatedContext.fillRect(0, 0, rotated.width, rotated.height)
-  rotatedContext.translate(rotated.width / 2, rotated.height / 2)
-  rotatedContext.rotate(rotation)
-  rotatedContext.imageSmoothingEnabled = true
-  rotatedContext.drawImage(cropped, -cropped.width / 2, -cropped.height / 2)
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, rotated.width, rotated.height)
+  context.translate(rotated.width / 2, rotated.height / 2)
+  context.rotate((rotation * Math.PI) / 180)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(sourceCanvas, -sourceCanvas.width / 2, -sourceCanvas.height / 2)
   return rotated
+}
+
+export function createRotatedCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  rotation: number,
+  expand = false,
+): HTMLCanvasElement {
+  if (expand) return rotateCanvasExpanded(sourceCanvas, rotation)
+  if (Math.abs(rotation) < 0.0001) return sourceCanvas
+  const rotated = document.createElement('canvas')
+  rotated.width = sourceCanvas.width
+  rotated.height = sourceCanvas.height
+
+  const context = rotated.getContext('2d', { alpha: false })
+  if (!context) return sourceCanvas
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, rotated.width, rotated.height)
+  context.translate(rotated.width / 2, rotated.height / 2)
+  context.rotate((rotation * Math.PI) / 180)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(sourceCanvas, -sourceCanvas.width / 2, -sourceCanvas.height / 2)
+  return rotated
+}
+
+function createLegacyCroppedCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  crop: Pick<CropApplied, 'x' | 'y' | 'width' | 'height' | 'rotation'>,
+): HTMLCanvasElement {
+  const cropped = cropCanvasToRect(sourceCanvas, crop)
+  return rotateCanvasExpanded(cropped, crop.rotation)
+}
+
+export function getCroppedCanvasDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  crop: CropApplied,
+): { width: number; height: number } {
+  const baseRect = getCropRectPixels(sourceWidth, sourceHeight, crop)
+  let { width, height } = getExpandedRotationDimensions(baseRect.width, baseRect.height, crop.rotation)
+
+  for (const step of crop.steps ?? []) {
+    if (step.expand) {
+      const rotatedDimensions = getExpandedRotationDimensions(width, height, step.rotation)
+      width = rotatedDimensions.width
+      height = rotatedDimensions.height
+    }
+    const rect = getCropRectPixels(width, height, step)
+    width = rect.width
+    height = rect.height
+  }
+
+  return { width, height }
+}
+
+export function createCroppedCanvas(sourceCanvas: HTMLCanvasElement, crop: CropApplied): HTMLCanvasElement {
+  let result = createLegacyCroppedCanvas(sourceCanvas, crop)
+  for (const step of crop.steps ?? []) {
+    const rotated = step.expand
+      ? rotateCanvasExpanded(result, step.rotation)
+      : createRotatedCanvas(result, step.rotation)
+    result = cropCanvasToRect(rotated, step)
+  }
+  return result
 }
 
 export type { CropApplied }
@@ -343,24 +461,44 @@ export type { CropApplied }
 /* Misc                                                                */
 /* ------------------------------------------------------------------ */
 
-export const HISTOGRAM_BUCKETS = 32
+export const HISTOGRAM_BUCKETS = 64
 
-export function getHistogram(image: HTMLCanvasElement): number[] {
+export type HistogramData = {
+  red: number[]
+  green: number[]
+  blue: number[]
+}
+
+export function createEmptyHistogram(): HistogramData {
+  return {
+    red: new Array(HISTOGRAM_BUCKETS).fill(0),
+    green: new Array(HISTOGRAM_BUCKETS).fill(0),
+    blue: new Array(HISTOGRAM_BUCKETS).fill(0),
+  }
+}
+
+export function getHistogram(image: HTMLCanvasElement): HistogramData {
   const context = image.getContext('2d')
-  if (!context) return new Array(HISTOGRAM_BUCKETS).fill(0)
+  if (!context) return createEmptyHistogram()
 
   const { data } = context.getImageData(0, 0, image.width, image.height)
-  const buckets = new Array(HISTOGRAM_BUCKETS).fill(0)
+  const channels = createEmptyHistogram()
   // Sample ~8,000 pixels for a sub-millisecond calculation.
   const stride = Math.max(1, Math.floor(data.length / (4 * 8000)))
   const step = stride * 4
   for (let i = 0; i < data.length; i += step) {
-    const luminance = clamp(((data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 8) | 0, 0, HISTOGRAM_BUCKETS - 1)
-    buckets[luminance] += 1
+    if (data[i + 3] < 8) continue
+    channels.red[Math.min(HISTOGRAM_BUCKETS - 1, (data[i] * HISTOGRAM_BUCKETS) >> 8)] += 1
+    channels.green[Math.min(HISTOGRAM_BUCKETS - 1, (data[i + 1] * HISTOGRAM_BUCKETS) >> 8)] += 1
+    channels.blue[Math.min(HISTOGRAM_BUCKETS - 1, (data[i + 2] * HISTOGRAM_BUCKETS) >> 8)] += 1
   }
 
-  const maxValue = Math.max(...buckets, 1)
-  return buckets.map((value) => (value / maxValue) * 100)
+  const maxValue = Math.max(...channels.red, ...channels.green, ...channels.blue, 1)
+  return {
+    red: channels.red.map((value) => (value / maxValue) * 100),
+    green: channels.green.map((value) => (value / maxValue) * 100),
+    blue: channels.blue.map((value) => (value / maxValue) * 100),
+  }
 }
 
 export function normalizeImageUrl(filePath: string): string {

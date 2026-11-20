@@ -369,6 +369,62 @@ button {
   flex-wrap: wrap;
 }
 
+.crop-custom-aspect,
+.crop-custom-aspect label,
+.crop-guide-control,
+.crop-straighten-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.crop-custom-aspect label {
+  color: var(--text-secondary);
+  font-size: var(--ui-font-size);
+}
+
+.crop-custom-aspect input {
+  width: 52px;
+  min-width: 0;
+  height: 28px;
+  padding: 2px 4px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+}
+
+.crop-custom-aspect input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.crop-guide-control,
+.crop-straighten-control {
+  color: var(--text-secondary);
+  font-size: var(--ui-font-size);
+}
+
+.crop-guide-control select {
+  max-width: 112px;
+  height: 28px;
+  padding: 2px 5px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+}
+
+.crop-straighten-control input {
+  width: 112px;
+  accent-color: var(--accent);
+}
+
+.crop-straighten-control output {
+  min-width: 42px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
 .stage-actions button {
   border: 1px solid var(--input-border);
   background: var(--input-bg);
@@ -535,26 +591,92 @@ button {
   font-size: 11px;
 }
 
-.histogram {
-  width: 100%;
-  height: 56px;
-  margin-bottom: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: linear-gradient(180deg, rgba(24, 168, 234, 0.2), rgba(24, 168, 234, 0.05));
-  position: relative;
-  overflow: hidden;
+.histogram-title-row {
   display: flex;
-  align-items: flex-end;
-  gap: 1px;
-  padding: 4px 4px 0;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.histogram-bar {
-  flex: 1;
-  min-width: 2px;
-  border-radius: 2px 2px 0 0;
-  background: linear-gradient(180deg, rgba(79, 208, 255, 0.9), rgba(131, 118, 255, 0.8));
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.2);
+.histogram-legend {
+  display: flex;
+  gap: 6px;
+  font-size: 9px;
+}
+
+.histogram-legend-red {
+  color: #ff7777;
+}
+
+.histogram-legend-green {
+  color: #7bdc8c;
+}
+
+.histogram-legend-blue {
+  color: #78a9ff;
+}
+
+.histogram {
+  width: 100%;
+  height: 76px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #101419;
+  position: relative;
+  overflow: hidden;
+}
+
+.histogram-chart {
+  position: absolute;
+  inset: 3px 4px 14px;
+  width: calc(100% - 8px);
+  height: calc(100% - 17px);
+}
+
+.histogram-grid {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 0.35;
+  vector-effect: non-scaling-stroke;
+}
+
+.histogram-area {
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+  fill-opacity: 0.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.histogram-red {
+  fill: #ff4545;
+  stroke: #ff6666;
+}
+
+.histogram-green {
+  fill: #38c75b;
+  stroke: #70e287;
+}
+
+.histogram-blue {
+  fill: #397cff;
+  stroke: #7eacff;
+}
+
+.histogram-axis {
+  position: absolute;
+  right: 4px;
+  bottom: 1px;
+  left: 4px;
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 8px;
+  line-height: 10px;
 }
 
 .histogram-actions {
@@ -777,21 +899,6 @@ button {
   font-size: var(--ui-font-size);
 }
 
-.histogram::before,
-.histogram::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to right,
-      rgba(0, 0, 0, 0) 0%,
-      rgba(0, 0, 0, 0) 10%,
-      rgba(111, 223, 255, 0.65) 11%,
-      rgba(84, 221, 142, 0.75) 17%,
-      rgba(255, 120, 93, 0.75) 24%,
-      rgba(255, 255, 255, 0.05) 100%);
-  mix-blend-mode: screen;
-}
-
 .crop-aspect-list {
   display: flex;
   flex-wrap: wrap;
@@ -810,6 +917,41 @@ button {
 .crop-chip.active {
   background: #16324d;
   border-color: #5da9e7;
+  color: #dff5ff;
+}
+
+.crop-context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--panel-elevated);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.crop-context-menu-title {
+  padding: 5px 9px;
+  color: var(--text-secondary);
+  font-size: var(--ui-font-size);
+}
+
+.crop-context-menu button {
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 9px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  font-size: var(--ui-font-size);
+}
+
+.crop-context-menu button:hover,
+.crop-context-menu button.active {
+  background: #16324d;
   color: #dff5ff;
 }
 

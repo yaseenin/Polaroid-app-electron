@@ -11,12 +11,14 @@ import {
 import {
   clamp,
   clampCropRectToCanvas,
+  createRotatedCanvas,
   drawCropOverlay,
   fitCropRectToAspect,
   getAspectValue,
   resizeCropRect,
 } from '../lib/canvasUtils'
-import type { CropApplied, CropAspect, CropCursor, CropHandle, CropRect } from '../types'
+import { MAX_PREVIEW_CANVAS } from '../lib/editorConstants'
+import type { CropApplied, CropAspect, CropCursor, CropGuide, CropHandle, CropRect, CropStep } from '../types'
 
 type CropDrag = {
   mode: 'new' | 'move' | 'resize'
@@ -24,6 +26,7 @@ type CropDrag = {
   startX: number
   startY: number
   startRect: CropRect
+  startAspectBase?: CropRect
 }
 
 type Args = {
@@ -32,51 +35,9 @@ type Args = {
   processedPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   cropAppliedByPhoto: Record<number, CropApplied | null>
   setCropAppliedByPhoto: Dispatch<SetStateAction<Record<number, CropApplied | null>>>
+  customAspectRatio: number
   recordHistory: () => void
   setStatus: (message: string) => void
-}
-
-function composeCropSelection(
-  baseCrop: CropApplied | null,
-  selection: CropRect,
-  canvasWidth: number,
-  canvasHeight: number,
-  rotation: number,
-): CropApplied {
-  const base = baseCrop ?? { x: 0, y: 0, width: 1, height: 1, rotation: 0 }
-  const x = selection.x / canvasWidth
-  const y = selection.y / canvasHeight
-  const width = selection.width / canvasWidth
-  const height = selection.height / canvasHeight
-  const quarterTurn = ((Math.round(base.rotation / 90) % 4) + 4) % 4
-
-  let localX = x
-  let localY = y
-  let localWidth = width
-  let localHeight = height
-
-  if (quarterTurn === 1) {
-    localX = y
-    localY = 1 - x - width
-    localWidth = height
-    localHeight = width
-  } else if (quarterTurn === 2) {
-    localX = 1 - x - width
-    localY = 1 - y - height
-  } else if (quarterTurn === 3) {
-    localX = 1 - y - height
-    localY = x
-    localWidth = height
-    localHeight = width
-  }
-
-  return {
-    x: base.x + localX * base.width,
-    y: base.y + localY * base.height,
-    width: localWidth * base.width,
-    height: localHeight * base.height,
-    rotation,
-  }
 }
 
 export function useCrop({
@@ -85,18 +46,22 @@ export function useCrop({
   processedPreviewCanvasRef,
   cropAppliedByPhoto,
   setCropAppliedByPhoto,
+  customAspectRatio,
   recordHistory,
   setStatus,
 }: Args) {
   const [cropMode, setCropMode] = useState(false)
   const [cropAspect, setCropAspect] = useState<CropAspect>('Free')
   const [cropRotation, setCropRotation] = useState(0)
+  const [cropStraighten, setCropStraighten] = useState(0)
+  const [cropGuide, setCropGuide] = useState<CropGuide>('Thirds')
   const [cropCursor, setCropCursor] = useState<CropCursor>('crosshair')
   const [cropRectByPhoto, setCropRectByPhoto] = useState<Record<number, CropRect | null>>({})
 
   const cropDragRef = useRef<CropDrag | null>(null)
   const cropRectRef = useRef<CropRect | null>(null)
   const cropAspectBaseByPhotoRef = useRef<Record<number, CropRect>>({})
+  const cropCanvasSizeByPhotoRef = useRef<Record<number, { width: number; height: number }>>({})
 
   const cropRect = activePhotoId !== undefined ? cropRectByPhoto[activePhotoId] ?? null : null
   const cropApplied = activePhotoId !== undefined ? cropAppliedByPhoto[activePhotoId] ?? null : null
@@ -105,10 +70,16 @@ export function useCrop({
   const setCropRectFor = useCallback(
     (photoId: number, rect: CropRect | null, aspectBase = rect) => {
       setCropRectByPhoto((current) => ({ ...current, [photoId]: rect }))
-      if (rect && aspectBase) cropAspectBaseByPhotoRef.current[photoId] = aspectBase
-      else delete cropAspectBaseByPhotoRef.current[photoId]
+      const canvas = previewCanvasRef.current
+      if (rect && aspectBase) {
+        cropAspectBaseByPhotoRef.current[photoId] = aspectBase
+        if (canvas) cropCanvasSizeByPhotoRef.current[photoId] = { width: canvas.width, height: canvas.height }
+      } else {
+        delete cropAspectBaseByPhotoRef.current[photoId]
+        delete cropCanvasSizeByPhotoRef.current[photoId]
+      }
     },
-    [],
+    [previewCanvasRef],
   )
 
   const toggleCropMode = () => {
@@ -117,13 +88,15 @@ export function useCrop({
       return
     }
 
+    setCropRotation(0)
+    setCropStraighten(0)
     setCropMode(true)
   }
 
   const changeCropAspect = (aspect: CropAspect) => {
     setCropAspect(aspect)
 
-    const ratio = getAspectValue(aspect)
+    const ratio = getAspectValue(aspect, customAspectRatio)
     if (activePhotoId === undefined || !cropRect) return
     const aspectBase = cropAspect === 'Free'
       ? cropRect
@@ -131,6 +104,19 @@ export function useCrop({
     const nextRect = aspect === 'Free' ? aspectBase : fitCropRectToAspect(aspectBase, ratio)
     setCropRectFor(activePhotoId, nextRect, aspectBase)
   }
+
+  useEffect(() => {
+    if (cropAspect !== 'Custom' || activePhotoId === undefined || !cropRect) return
+    const aspectBase = cropAspectBaseByPhotoRef.current[activePhotoId] ?? cropRect
+    const nextRect = fitCropRectToAspect(aspectBase, customAspectRatio)
+    if (
+      Math.abs(nextRect.x - cropRect.x) < 0.5 &&
+      Math.abs(nextRect.y - cropRect.y) < 0.5 &&
+      Math.abs(nextRect.width - cropRect.width) < 0.5 &&
+      Math.abs(nextRect.height - cropRect.height) < 0.5
+    ) return
+    setCropRectFor(activePhotoId, nextRect, aspectBase)
+  }, [activePhotoId, cropAspect, cropRect, customAspectRatio, setCropRectFor])
 
   const setCropAppliedFor = useCallback(
     (photoId: number, applied: CropApplied | null) =>
@@ -141,6 +127,7 @@ export function useCrop({
   // Show the active photo's saved rotation whenever another photo becomes active.
   useEffect(() => {
     setCropRotation(cropApplied?.rotation ?? 0)
+    setCropStraighten(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePhotoId])
 
@@ -150,8 +137,69 @@ export function useCrop({
     const canvas = previewCanvasRef.current
     const source = processedPreviewCanvasRef.current
     if (!cropMode || !canvas || !source) return
-    drawCropOverlay(canvas, source, cropRect, true, cropAspect)
-  }, [cropMode, cropRect, cropAspect, previewCanvasRef, processedPreviewCanvasRef])
+    const rotatedSource = createRotatedCanvas(source, cropStraighten, true)
+    const scale = Math.min(MAX_PREVIEW_CANVAS / rotatedSource.width, MAX_PREVIEW_CANVAS / rotatedSource.height, 1)
+    const width = Math.max(1, Math.round(rotatedSource.width * scale))
+    const height = Math.max(1, Math.round(rotatedSource.height * scale))
+    let displayRect = cropRect
+
+    const previousSize = activePhotoId === undefined
+      ? undefined
+      : cropCanvasSizeByPhotoRef.current[activePhotoId]
+    let scaledBase: CropRect | null = null
+    if (
+      cropRect &&
+      activePhotoId !== undefined &&
+      previousSize &&
+      (previousSize.width !== width || previousSize.height !== height)
+    ) {
+      const scaleX = width / previousSize.width
+      const scaleY = height / previousSize.height
+      const scaleRect = (rect: CropRect): CropRect => ({
+        x: rect.x * scaleX,
+        y: rect.y * scaleY,
+        width: rect.width * scaleX,
+        height: rect.height * scaleY,
+      })
+      scaledBase = scaleRect(cropAspectBaseByPhotoRef.current[activePhotoId] ?? cropRect)
+      displayRect = scaleRect(cropRect)
+      displayRect = clampCropRectToCanvas(
+        displayRect,
+        width,
+        height,
+        getAspectValue(cropAspect, customAspectRatio),
+      )
+    }
+
+    if (canvas.width !== width) canvas.width = width
+    if (canvas.height !== height) canvas.height = height
+    if (activePhotoId !== undefined && displayRect && scaledBase) {
+      setCropRectFor(activePhotoId, displayRect, scaledBase)
+    } else if (activePhotoId !== undefined) {
+      cropCanvasSizeByPhotoRef.current[activePhotoId] = { width, height }
+    }
+    drawCropOverlay(
+      canvas,
+      rotatedSource,
+      displayRect,
+      true,
+      cropAspect,
+      customAspectRatio,
+      cropGuide,
+    )
+  }, [
+    activePhotoId,
+    cropMode,
+    cropRect,
+    cropAspect,
+    cropRotation,
+    cropStraighten,
+    cropGuide,
+    customAspectRatio,
+    previewCanvasRef,
+    processedPreviewCanvasRef,
+    setCropRectFor,
+  ])
 
   /* ---- Pointer interaction ---- */
   const getHandleAtPoint = (x: number, y: number): CropHandle | null => {
@@ -203,12 +251,25 @@ export function useCrop({
     if (cropRect) {
       const handle = getHandleAtPoint(x, y)
       if (handle) {
-        cropDragRef.current = { mode: 'resize', handle, startX: x, startY: y, startRect: cropRect }
+        cropDragRef.current = {
+          mode: 'resize',
+          handle,
+          startX: x,
+          startY: y,
+          startRect: cropRect,
+          startAspectBase: cropAspectBaseByPhotoRef.current[activePhotoId] ?? cropRect,
+        }
         return
       }
 
       if (x >= cropRect.x && x <= cropRect.x + cropRect.width && y >= cropRect.y && y <= cropRect.y + cropRect.height) {
-        cropDragRef.current = { mode: 'move', startX: x, startY: y, startRect: cropRect }
+        cropDragRef.current = {
+          mode: 'move',
+          startX: x,
+          startY: y,
+          startRect: cropRect,
+          startAspectBase: cropAspectBaseByPhotoRef.current[activePhotoId] ?? cropRect,
+        }
         return
       }
     }
@@ -229,17 +290,19 @@ export function useCrop({
       return
     }
 
-    const aspectRatio = getAspectValue(cropAspect)
+    const aspectRatio = getAspectValue(cropAspect, customAspectRatio)
     let nextRect: CropRect
+    let aspectBase: CropRect
 
     if (drag.mode === 'new') {
+      aspectBase = clampCropRectToCanvas({
+        x: Math.min(drag.startX, x),
+        y: Math.min(drag.startY, y),
+        width: Math.max(10, Math.abs(x - drag.startX)),
+        height: Math.max(10, Math.abs(y - drag.startY)),
+      }, canvas.width, canvas.height)
       nextRect = clampCropRectToCanvas(
-        {
-          x: Math.min(drag.startX, x),
-          y: Math.min(drag.startY, y),
-          width: Math.max(10, Math.abs(x - drag.startX)),
-          height: Math.max(10, Math.abs(y - drag.startY)),
-        },
+        aspectBase,
         canvas.width,
         canvas.height,
         aspectRatio,
@@ -247,6 +310,15 @@ export function useCrop({
     } else if (drag.mode === 'move') {
       const width = Math.min(drag.startRect.width, canvas.width)
       const height = Math.min(drag.startRect.height, canvas.height)
+      const startAspectBase = drag.startAspectBase ?? drag.startRect
+      const baseWidth = Math.min(startAspectBase.width, canvas.width)
+      const baseHeight = Math.min(startAspectBase.height, canvas.height)
+      aspectBase = {
+        x: clamp(startAspectBase.x + (x - drag.startX), 0, canvas.width - baseWidth),
+        y: clamp(startAspectBase.y + (y - drag.startY), 0, canvas.height - baseHeight),
+        width: baseWidth,
+        height: baseHeight,
+      }
       nextRect = {
         x: clamp(drag.startRect.x + (x - drag.startX), 0, canvas.width - width),
         y: clamp(drag.startRect.y + (y - drag.startY), 0, canvas.height - height),
@@ -254,7 +326,8 @@ export function useCrop({
         height,
       }
     } else if (drag.handle) {
-      nextRect = resizeCropRect(drag.handle, drag.startRect, x, y, canvas.width, canvas.height, aspectRatio)
+      aspectBase = resizeCropRect(drag.handle, drag.startRect, x, y, canvas.width, canvas.height, null)
+      nextRect = clampCropRectToCanvas(aspectBase, canvas.width, canvas.height, aspectRatio)
     } else {
       return
     }
@@ -271,10 +344,20 @@ export function useCrop({
       return
     }
 
-    setCropRectFor(activePhotoId, nextRect)
+    setCropRectFor(activePhotoId, nextRect, aspectBase)
     setCropCursor(getCursorAtPoint(x, y))
     const source = processedPreviewCanvasRef.current
-    if (source) drawCropOverlay(canvas, source, nextRect, true, cropAspect)
+    if (source) {
+      drawCropOverlay(
+        canvas,
+        createRotatedCanvas(source, cropStraighten, true),
+        nextRect,
+        true,
+        cropAspect,
+        customAspectRatio,
+        cropGuide,
+      )
+    }
   }
 
   const onMouseUp = () => {
@@ -296,8 +379,6 @@ export function useCrop({
     setCropRotation((current) => (current + delta + 360) % 360)
   }
 
-  /** Rotate buttons under the preview. In crop mode they adjust the pending crop rotation (applied with
-   *  "Apply"); otherwise they rotate the photo immediately via a full-frame crop. */
   const handleRotatePhoto = (delta: number) => {
     if (cropMode) {
       handleCropRotate(delta)
@@ -306,9 +387,16 @@ export function useCrop({
     if (activePhotoId === undefined) return
     recordHistory()
     const base: CropApplied = cropApplied ?? { x: 0, y: 0, width: 1, height: 1, rotation: 0 }
-    const rotation = ((((base.rotation ?? 0) + delta) % 360) + 360) % 360
-    setCropAppliedFor(activePhotoId, { ...base, rotation })
-    setCropRotation(rotation)
+    if (base.steps?.length) {
+      setCropAppliedFor(activePhotoId, {
+        ...base,
+        steps: [...base.steps, { x: 0, y: 0, width: 1, height: 1, rotation: delta, expand: true }],
+      })
+    } else {
+      const rotation = ((((base.rotation ?? 0) + delta) % 360) + 360) % 360
+      setCropAppliedFor(activePhotoId, { ...base, rotation })
+      setCropRotation(rotation)
+    }
   }
 
   const handleCropApply = () => {
@@ -320,13 +408,25 @@ export function useCrop({
     const canvasWidth = previewCanvasRef.current?.width ?? 1
     const canvasHeight = previewCanvasRef.current?.height ?? 1
     recordHistory()
-    setCropAppliedFor(activePhotoId, composeCropSelection(
-      cropApplied,
-      cropRect,
-      canvasWidth,
-      canvasHeight,
-      cropRotation,
-    ))
+    const base: CropApplied = cropApplied ?? { x: 0, y: 0, width: 1, height: 1, rotation: 0 }
+    const steps: CropStep[] = [
+      ...(base.steps ?? []),
+      {
+        x: cropRect.x / canvasWidth,
+        y: cropRect.y / canvasHeight,
+        width: cropRect.width / canvasWidth,
+        height: cropRect.height / canvasHeight,
+        rotation: cropStraighten,
+        expand: true,
+      },
+    ]
+    if (cropRotation % 360 !== 0) {
+      steps.push({ x: 0, y: 0, width: 1, height: 1, rotation: cropRotation, expand: true })
+    }
+    setCropAppliedFor(activePhotoId, {
+      ...base,
+      steps,
+    })
     setCropRectFor(activePhotoId, null)
     setCropMode(false)
     setStatus('Crop applied to the selected image.')
@@ -340,6 +440,7 @@ export function useCrop({
     }
     setCropMode(false)
     setCropRotation(0)
+    setCropStraighten(0)
     setStatus('Crop removed.')
   }
 
@@ -351,6 +452,10 @@ export function useCrop({
     setCropAspect: changeCropAspect,
     cropRotation,
     setCropRotation,
+    cropStraighten,
+    setCropStraighten,
+    cropGuide,
+    setCropGuide,
     cropCursor,
     cropRect,
     cropRectRef,

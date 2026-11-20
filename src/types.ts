@@ -16,10 +16,28 @@ export type NativeImagePickerResult = {
   dataUrls?: string[]
 }
 
-export type CropApplied = { x: number; y: number; width: number; height: number; rotation: number }
+export type CropStep = {
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  /** Rotate into an expanded canvas before applying the crop rectangle. */
+  expand?: boolean
+}
+export type CropApplied = {
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: number
+  /** Sequential straighten-and-crop operations applied after the original crop. */
+  steps?: CropStep[]
+}
 export type CropRect = { x: number; y: number; width: number; height: number }
 export type CropHandle = 'nw' | 'ne' | 'sw' | 'se'
-export type CropAspect = 'Free' | 'Square' | 'Mini' | 'Wide'
+export type CropAspect = 'Free' | 'Square' | 'Mini' | 'Wide' | 'Custom'
+export type CropGuide = 'Thirds' | 'Center' | 'Golden Ratio' | 'None'
 export type CropCursor = 'crosshair' | 'move' | 'nwse-resize' | 'nesw-resize'
 
 export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'pdf'
