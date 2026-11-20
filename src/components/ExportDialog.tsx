@@ -414,9 +414,9 @@ export function ExportDialog({
 
               {totalPages > 1 && (
                 <div className="export-pagination">
-                  <button type="button" onClick={() => onPreviewPageChange((p) => Math.max(0, p - 1))} disabled={currentPage === 0}>Previous</button>
+                  <button type="button" title="Show the previous export sheet" onClick={() => onPreviewPageChange((p) => Math.max(0, p - 1))} disabled={currentPage === 0}>Previous</button>
                   <span>Page {currentPage + 1} of {totalPages}</span>
-                  <button type="button" onClick={() => onPreviewPageChange((p) => Math.min(totalPages - 1, p + 1))} disabled={currentPage === totalPages - 1}>Next</button>
+                  <button type="button" title="Show the next export sheet" onClick={() => onPreviewPageChange((p) => Math.min(totalPages - 1, p + 1))} disabled={currentPage === totalPages - 1}>Next</button>
                 </div>
               )}
             </div>

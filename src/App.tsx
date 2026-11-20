@@ -1524,6 +1524,7 @@ function App() {
     <div className="app dark" onClick={() => cropContextMenu && setCropContextMenu(null)}>
       <input
         ref={fileInputRef}
+        title="Choose image files to add to the editor"
         type="file"
         accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"
         multiple
@@ -1532,6 +1533,7 @@ function App() {
       />
       <input
         ref={projectInputRef}
+        title="Choose a saved Polaroid project to open"
         type="file"
         accept=".json,.polaroid,application/json"
         hidden
@@ -1579,6 +1581,7 @@ function App() {
                       <label>
                         W
                         <input
+                          title="Set the custom crop ratio width"
                           type="number"
                           min="1"
                           step="any"
@@ -1592,6 +1595,7 @@ function App() {
                       <label>
                         H
                         <input
+                          title="Set the custom crop ratio height"
                           type="number"
                           min="1"
                           step="any"
@@ -1605,7 +1609,7 @@ function App() {
                   ) : null}
                   <label className="crop-guide-control">
                     Guides
-                    <select aria-label="Crop guide" value={cropGuide} onChange={(event) => setCropGuide(event.target.value as typeof cropGuide)}>
+                    <select title="Choose the crop composition guide" aria-label="Crop guide" value={cropGuide} onChange={(event) => setCropGuide(event.target.value as typeof cropGuide)}>
                       <option value="Thirds">Thirds</option>
                       <option value="Center">Center</option>
                       <option value="Golden Ratio">Golden Ratio</option>
@@ -1620,6 +1624,7 @@ function App() {
                   <label className="crop-straighten-control">
                     Straighten
                     <input
+                      title="Straighten the crop between -45° and 45°"
                       type="range"
                       min="-45"
                       max="45"
@@ -1724,6 +1729,7 @@ function App() {
                     role="menuitemradio"
                     aria-checked={cropAspect === aspect}
                     className={cropAspect === aspect ? 'active' : ''}
+                    title={`Set ${aspect} crop ratio`}
                     onClick={() => {
                       setCropAspect(aspect)
                       setCropContextMenu(null)
@@ -1897,7 +1903,7 @@ function App() {
             <div className="slider-stack">
               {ADJUSTMENT_GROUPS.map((group) => (
                 <details className="adjustment-group" key={group.label} open={group.label !== 'Detail'}>
-                  <summary>{group.label}</summary>
+                  <summary title={`Show or hide ${group.label.toLowerCase()} adjustment controls`}>{group.label}</summary>
                   <div className="adjustment-group-controls">
                     {SLIDERS.filter(({ key }) => group.keys.includes(key)).map(({ key, label, min, max }) => (
                       <Fragment key={key}>
@@ -1905,6 +1911,7 @@ function App() {
                           <div className="white-balance-toolbar">
                             <span>White Balance</span>
                             <select
+                              title="Choose a white balance preset"
                               aria-label="White balance preset"
                               value=""
                               disabled={!activePhoto}

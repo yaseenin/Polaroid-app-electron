@@ -74,12 +74,13 @@ function formatMeasurement(valueMm: number, units: ImpositionUnits): string {
   return fromMillimetres(valueMm, units).toFixed(units === 'mm' ? 1 : 2)
 }
 
-type NumericInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> & {
+type NumericInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange' | 'title'> & {
+  title: string
   value: number | string
   onChange: (value: string) => void
 }
 
-function NumericInput({ value, onChange, onFocus, onBlur, ...props }: NumericInputProps) {
+function NumericInput({ title, value, onChange, onFocus, onBlur, ...props }: NumericInputProps) {
   const displayValue = String(value)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(displayValue)
@@ -91,6 +92,7 @@ function NumericInput({ value, onChange, onFocus, onBlur, ...props }: NumericInp
   return (
     <input
       {...props}
+      title={title}
       type="number"
       inputMode="decimal"
       value={editing ? draft : displayValue}
@@ -1292,18 +1294,18 @@ export function ImpositionBuilder({
         <div className="imposition-brand"><span className="imposition-brand-mark">P</span><strong>Imposition Builder</strong></div>
         <div className="imposition-toolbar-actions">
           <div className="imposition-toolbar-group" role="group" aria-label="Project">
-            <button type="button" onClick={onNew}>New</button>
-            <button type="button" onClick={() => void openImpositionProject()}>Open</button>
-            <button type="button" onClick={() => void saveImpositionProject()}>Save</button>
+            <button type="button" title="Create a new imposition project" onClick={onNew}>New</button>
+            <button type="button" title="Open an imposition project" onClick={() => void openImpositionProject()}>Open</button>
+            <button type="button" title="Save the current imposition project" onClick={() => void saveImpositionProject()}>Save</button>
           </div>
           <span className="imposition-toolbar-separator" />
           <div className="imposition-toolbar-group" role="group" aria-label="Layout and export">
             <button type="button" className="imposition-toolbar-primary" title="Import and arrange all photos from the artwork library" onClick={() => void generateAutomaticLayout(true)} disabled={layoutPending || (!document.designs.length && !photos.length)}>
               {layoutPending ? 'Arranging…' : 'Arrange all photos'}
             </button>
-            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>{exporting ? 'Checking…' : 'Preflight'}</button>
-            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Export</button>
-            <button type="button" onClick={() => void reviewPreflight()} disabled={exporting}>Print-ready PDF</button>
+            <button type="button" title="Check artwork and print settings before export" onClick={() => void reviewPreflight()} disabled={exporting}>{exporting ? 'Checking…' : 'Preflight'}</button>
+            <button type="button" title="Review preflight before exporting" onClick={() => void reviewPreflight()} disabled={exporting}>Export</button>
+            <button type="button" title="Review preflight before creating a print-ready PDF" onClick={() => void reviewPreflight()} disabled={exporting}>Print-ready PDF</button>
           </div>
           <span className="imposition-toolbar-separator" />
           <div className="imposition-toolbar-group" role="group" aria-label="Edit">
@@ -1317,10 +1319,10 @@ export function ImpositionBuilder({
             <button type="button" title="Zoom out" onClick={() => setZoom((value) => Math.max(0.1, value / 1.2))}>−</button>
             <span className="imposition-zoom-value">{Math.round(zoom * 100)}%</span>
             <button type="button" title="Zoom in" onClick={() => setZoom((value) => Math.min(4, value * 1.2))}>+</button>
-            <button type="button" onClick={fitSheet}>Fit sheet</button>
+            <button type="button" title="Fit the complete sheet in the workspace" onClick={fitSheet}>Fit sheet</button>
             <button type="button" onClick={() => setZoom(1)} title="Preview at 96 CSS pixels per inch">Actual size</button>
           </div>
-          <button type="button" className="imposition-close" onClick={onClose}>Back to editor</button>
+          <button type="button" className="imposition-close" title="Return to the photo editor" onClick={onClose}>Back to editor</button>
         </div>
       </header>
 
@@ -1344,12 +1346,12 @@ export function ImpositionBuilder({
           <section>
             <h2>Shapes</h2>
             <div className="imposition-shape-tools">
-              <button type="button" onClick={() => createBaseObject('Rectangle', 'rectangle')}>Rectangle</button>
-              <button type="button" onClick={() => createBaseObject('Ellipse', 'ellipse')}>Ellipse</button>
-              <button type="button" onClick={() => createBaseObject('Line', 'line')}>Line</button>
-              <button type="button" onClick={() => createBaseObject('Text', 'text')}>Text</button>
-              <button type="button" onClick={() => addGuide('horizontal')}>Horizontal guide</button>
-              <button type="button" onClick={() => addGuide('vertical')}>Vertical guide</button>
+              <button type="button" title="Add a rectangle shape to the sheet" onClick={() => createBaseObject('Rectangle', 'rectangle')}>Rectangle</button>
+              <button type="button" title="Add an ellipse shape to the sheet" onClick={() => createBaseObject('Ellipse', 'ellipse')}>Ellipse</button>
+              <button type="button" title="Add a line to the sheet" onClick={() => createBaseObject('Line', 'line')}>Line</button>
+              <button type="button" title="Add a text object to the sheet" onClick={() => createBaseObject('Text', 'text')}>Text</button>
+              <button type="button" title="Add a horizontal alignment guide" onClick={() => addGuide('horizontal')}>Horizontal guide</button>
+              <button type="button" title="Add a vertical alignment guide" onClick={() => addGuide('vertical')}>Vertical guide</button>
             </div>
           </section>
           <section>
@@ -1378,6 +1380,7 @@ export function ImpositionBuilder({
                 key={object.id}
                 className={`imposition-object-entry${selectedIds.includes(object.id) ? ' active' : ''}`}
                 onClick={() => setSelectedIds([object.id])}
+                title={`Select ${object.name}`}
               >
                 {object.visible ? '◉' : '○'} {object.name}{object.locked ? ' 🔒' : ''}
               </button>
@@ -1391,7 +1394,7 @@ export function ImpositionBuilder({
             </div>
             {document.sheets.map((item, index) => (
               <div className="imposition-sheet-row" key={item.id}>
-                <button type="button" className={`imposition-sheet-entry${item.id === sheet.id ? ' active' : ''}`} aria-current={item.id === sheet.id ? 'page' : undefined} onClick={() => {
+                <button type="button" className={`imposition-sheet-entry${item.id === sheet.id ? ' active' : ''}`} title={`Select sheet ${index + 1}: ${item.name}`} aria-current={item.id === sheet.id ? 'page' : undefined} onClick={() => {
                   setActiveSheetId(item.id)
                   setSelectedIds([])
                 }}>{index + 1}. {item.name}</button>
@@ -1501,12 +1504,13 @@ export function ImpositionBuilder({
             <>
               <label>
                 Name
-                <input value={selectedObject.name} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(event) => updateSelected((object) => ({ ...object, name: event.target.value }))} />
+                <input title="Rename the selected object" value={selectedObject.name} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(event) => updateSelected((object) => ({ ...object, name: event.target.value }))} />
               </label>
               <div className="imposition-dimensions">
                 {(['xMm', 'yMm'] as const).map((key) => (
                   <label key={key}>{key[0].toUpperCase()} ({UNIT_LABELS[document.units]})
                     <NumericInput
+                      title={`Set the ${key === 'xMm' ? 'horizontal' : 'vertical'} position in ${UNIT_LABELS[document.units]}`}
                       step="0.1"
                       value={formatMeasurement(selectedObject[key], document.units)}
                       onFocus={beginFieldEdit}
@@ -1524,6 +1528,7 @@ export function ImpositionBuilder({
                 {(['widthMm', 'heightMm'] as const).map((key) => (
                   <label key={key}>{key === 'widthMm' ? 'Width' : 'Height'} ({UNIT_LABELS[document.units]})
                     <NumericInput
+                      title={`Set the object ${key === 'widthMm' ? 'width' : 'height'} in ${UNIT_LABELS[document.units]}`}
                       min="0.1"
                       step="0.1"
                       value={formatMeasurement(selectedObject[key] * (key === 'widthMm' ? selectedObject.scaleX : selectedObject.scaleY), document.units)}
@@ -1538,17 +1543,17 @@ export function ImpositionBuilder({
                   </label>
                 ))}
               </div>
-              <label className="imposition-checkbox"><input type="checkbox" checked={lockAspectRatio} onChange={(event) => setLockAspectRatio(event.target.checked)} /> Lock aspect ratio</label>
+              <label className="imposition-checkbox"><input type="checkbox" title="Keep the selected object's width and height proportions when resizing" checked={lockAspectRatio} onChange={(event) => setLockAspectRatio(event.target.checked)} /> Lock aspect ratio</label>
               {selectedObject.type === 'image' ? (
                 <label className="imposition-checkbox imposition-global-size">
-                  <input type="checkbox" checked={applySizeToAllArtwork} onChange={(event) => setApplySizeToAllArtwork(event.target.checked)} />
+                  <input type="checkbox" title="Apply this size to every design in the artwork library" checked={applySizeToAllArtwork} onChange={(event) => setApplySizeToAllArtwork(event.target.checked)} />
                   Apply size changes to all designs
                 </label>
               ) : null}
               <div className="imposition-dimensions">
                 {(['scaleX', 'scaleY'] as const).map((key) => (
                   <label key={key}>{key === 'scaleX' ? 'Scale X' : 'Scale Y'}
-                    <NumericInput min="0.01" step="0.01" value={selectedObject[key]} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
+                    <NumericInput title={`Set ${key === 'scaleX' ? 'horizontal' : 'vertical'} scale`} min="0.01" step="0.01" value={selectedObject[key]} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
                       const value = Number(rawValue)
                       if (Number.isFinite(value) && value > 0) updateSelected((object) => ({ ...object, [key]: value }))
                     }} />
@@ -1557,7 +1562,7 @@ export function ImpositionBuilder({
               </div>
               <label>
                 Rotation (°)
-                <NumericInput step="1" value={selectedObject.rotationDeg} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
+                <NumericInput title="Set the selected object's rotation in degrees" step="1" value={selectedObject.rotationDeg} onFocus={beginFieldEdit} onBlur={endFieldEdit} disabled={selectedObjectLocked} onChange={(rawValue) => {
                   const value = Number(rawValue)
                   if (Number.isFinite(value)) updateSelected((object) => ({ ...object, rotationDeg: value }))
                 }} />
@@ -1567,6 +1572,7 @@ export function ImpositionBuilder({
                   <label>
                     Copies of design
                     <NumericInput
+                      title="Set how many copies of this design to place"
                       min="1"
                       step="1"
                       value={document.designs.find((design) => design.id === selectedObject.designId)?.quantity ?? 1}
@@ -1585,7 +1591,7 @@ export function ImpositionBuilder({
                     />
                   </label>
                   <details className="imposition-adjustments">
-                    <summary>Image adjustments</summary>
+                    <summary title="Show or hide adjustments for this image">Image adjustments</summary>
                     {SLIDERS.map(({ key, label, min, max }) => {
                       const design = document.designs.find((item) => item.id === selectedObject.designId)
                       const value = selectedObject.settingsOverride?.[key] ?? design?.settings[key] ?? NEUTRAL_SETTINGS[key]
@@ -1593,6 +1599,7 @@ export function ImpositionBuilder({
                         <label key={key}>
                           <span>{label} <output>{value.toFixed(2)}</output></span>
                           <input
+                            title={`Adjust ${label.toLowerCase()} for this image`}
                             type="range"
                             min={min}
                             max={max}
@@ -1622,7 +1629,7 @@ export function ImpositionBuilder({
                         </label>
                       )
                     })}
-                    <button type="button" onClick={() => updateSelected((object) => (
+                    <button type="button" title="Reset image adjustments and crop to the original design" onClick={() => updateSelected((object) => (
                       object.type === 'image'
                         ? { ...object, settingsOverride: NEUTRAL_SETTINGS, cropOverride: null }
                         : object
@@ -1631,26 +1638,26 @@ export function ImpositionBuilder({
                 </>
               ) : null}
               <div className="imposition-property-actions">
-                <button type="button" onClick={duplicateSelected}>Duplicate</button>
-                <button type="button" onClick={() => updateSelected((object) => ({ ...object, locked: !object.locked }))}>{selectedObject.locked ? 'Unlock' : 'Lock'}</button>
-                <button type="button" onClick={() => updateSelected((object) => ({ ...object, visible: !object.visible }))}>{selectedObject.visible ? 'Hide' : 'Show'}</button>
-                <button type="button" onClick={() => {
+                <button type="button" title="Create a duplicate of the selected object" onClick={duplicateSelected}>Duplicate</button>
+                <button type="button" title={selectedObject.locked ? 'Unlock the selected object for editing' : 'Lock the selected object from editing'} onClick={() => updateSelected((object) => ({ ...object, locked: !object.locked }))}>{selectedObject.locked ? 'Unlock' : 'Lock'}</button>
+                <button type="button" title={selectedObject.visible ? 'Hide the selected object' : 'Show the selected object'} onClick={() => updateSelected((object) => ({ ...object, visible: !object.visible }))}>{selectedObject.visible ? 'Hide' : 'Show'}</button>
+                <button type="button" title="Move the selected object one level forward" onClick={() => {
                   const objects = [...sheet.objects]
                   const index = objects.findIndex((object) => object.id === selectedObject.id)
                   if (index >= 0 && index < objects.length - 1) [objects[index], objects[index + 1]] = [objects[index + 1], objects[index]]
                   setObjects(objects)
                 }}>Bring forward</button>
-                <button type="button" onClick={() => {
+                <button type="button" title="Move the selected object one level backward" onClick={() => {
                   const objects = [...sheet.objects]
                   const index = objects.findIndex((object) => object.id === selectedObject.id)
                   if (index > 0) [objects[index], objects[index - 1]] = [objects[index - 1], objects[index]]
                   setObjects(objects)
                 }}>Send backward</button>
-                <button type="button" className="danger" onClick={deleteSelected}>Delete</button>
+                <button type="button" className="danger" title="Delete the selected object" onClick={deleteSelected}>Delete</button>
               </div>
               <label>
                 Layer
-                <select value={selectedObject.layerId} onChange={(event) => updateSelected((object) => ({ ...object, layerId: event.target.value }))}>
+                <select title="Choose which layer contains the selected object" value={selectedObject.layerId} onChange={(event) => updateSelected((object) => ({ ...object, layerId: event.target.value }))}>
                   {sheet.layers.map((layer) => <option key={layer.id} value={layer.id} disabled={layer.locked || !layer.visible}>{layer.name}</option>)}
                 </select>
               </label>
@@ -1678,7 +1685,7 @@ export function ImpositionBuilder({
           ) : (
           <>
           <details className="imposition-settings-group">
-            <summary>
+            <summary title="Show or hide page size, margins, bleed, and PDF resolution settings">
               <span>Page setup</span>
               <span className="imposition-summary-meta">{PAPER_LABELS[sheet.paper.size]} · {sheet.paper.orientation}</span>
             </summary>
@@ -1686,23 +1693,24 @@ export function ImpositionBuilder({
             <div className="imposition-settings-content">
           <label>
             Sheet name
-            <input value={sheet.name} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => updateSheet((current) => ({ ...current, name: event.target.value }))} />
+            <input title="Rename the active sheet" value={sheet.name} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(event) => updateSheet((current) => ({ ...current, name: event.target.value }))} />
           </label>
           <label>
             Units
-            <select value={document.units} onChange={(event) => commitDocument({ ...document, units: event.target.value as ImpositionUnits })}>
+            <select title="Choose the measurement units used in sheet settings" value={document.units} onChange={(event) => commitDocument({ ...document, units: event.target.value as ImpositionUnits })}>
               {Object.entries(UNIT_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
             </select>
           </label>
           <label>
             Paper size
-            <select value={sheet.paper.size} onChange={(event) => setPaperSize(event.target.value as ImpositionPaperKey)}>
+            <select title="Choose the active sheet's paper size" value={sheet.paper.size} onChange={(event) => setPaperSize(event.target.value as ImpositionPaperKey)}>
               {Object.entries(PAPER_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
             </select>
           </label>
           <label>
             Orientation
             <select
+              title="Choose portrait or landscape page orientation"
               value={sheet.paper.orientation}
               onChange={(event) => updateSheet((current) => ({
                 ...current,
@@ -1715,8 +1723,8 @@ export function ImpositionBuilder({
           </label>
           {sheet.paper.size === 'custom' ? (
             <div className="imposition-dimensions">
-              <label>Width ({UNIT_LABELS[document.units]})<NumericInput min="0.1" step="0.1" value={formatMeasurement(dimensions.widthMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('widthMm', value)} /></label>
-              <label>Height ({UNIT_LABELS[document.units]})<NumericInput min="0.1" step="0.1" value={formatMeasurement(dimensions.heightMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('heightMm', value)} /></label>
+              <label>Width ({UNIT_LABELS[document.units]})<NumericInput title={`Set the custom sheet width in ${UNIT_LABELS[document.units]}`} min="0.1" step="0.1" value={formatMeasurement(dimensions.widthMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('widthMm', value)} /></label>
+              <label>Height ({UNIT_LABELS[document.units]})<NumericInput title={`Set the custom sheet height in ${UNIT_LABELS[document.units]}`} min="0.1" step="0.1" value={formatMeasurement(dimensions.heightMm, document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => setCustomDimension('heightMm', value)} /></label>
             </div>
           ) : null}
           <fieldset>
@@ -1724,13 +1732,14 @@ export function ImpositionBuilder({
             {(['top', 'right', 'bottom', 'left'] as const).map((edge) => (
               <label className="imposition-margin-field" key={edge}>
                 {edge[0].toUpperCase() + edge.slice(1)}
-                <NumericInput min="0" step="0.1" value={formatMeasurement(sheet.marginsMm[edge], document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => updateMeasurement(edge, value)} />
+                <NumericInput title={`Set the ${edge} page margin in ${UNIT_LABELS[document.units]}`} min="0" step="0.1" value={formatMeasurement(sheet.marginsMm[edge], document.units)} onFocus={beginFieldEdit} onBlur={endFieldEdit} onChange={(value) => updateMeasurement(edge, value)} />
               </label>
             ))}
           </fieldset>
           <label>
             Bleed ({UNIT_LABELS[document.units]})
             <NumericInput
+              title={`Set the bleed amount in ${UNIT_LABELS[document.units]}`}
               min="0"
               step="0.1"
               value={formatMeasurement(sheet.bleedMm, document.units)}
@@ -1745,6 +1754,7 @@ export function ImpositionBuilder({
           <label>
             Safe area ({UNIT_LABELS[document.units]})
             <NumericInput
+              title={`Set the safe area in ${UNIT_LABELS[document.units]}`}
               min="0"
               step="0.1"
               value={formatMeasurement(sheet.safeAreaMm, document.units)}
@@ -1759,6 +1769,7 @@ export function ImpositionBuilder({
           <label>
             PDF output resolution (DPI)
             <NumericInput
+              title="Set the PDF export resolution in dots per inch"
               min="72"
               max="1200"
               step="1"
@@ -1780,7 +1791,7 @@ export function ImpositionBuilder({
             <p className="imposition-help-text">Choose how imported artwork is repeated and spaced on the sheet.</p>
             <label>
               Strategy
-              <select value={sheet.layout.mode} onChange={(event) => updateSheet((current) => ({
+              <select title="Choose how artwork is automatically arranged on the sheet" value={sheet.layout.mode} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 layout: {
                   ...current.layout,
@@ -1799,6 +1810,7 @@ export function ImpositionBuilder({
               <label className="imposition-margin-field" key={key}>
                 {key === 'horizontalGapMm' ? 'Horizontal gap' : 'Vertical gap'} ({UNIT_LABELS[document.units]})
                 <NumericInput
+                  title={`Set the ${key === 'horizontalGapMm' ? 'horizontal' : 'vertical'} gap between artwork in ${UNIT_LABELS[document.units]}`}
                   min="0"
                   step="0.1"
                   value={formatMeasurement(sheet.layout[key], document.units)}
@@ -1818,7 +1830,7 @@ export function ImpositionBuilder({
               </label>
             ))}
             <label className="imposition-checkbox">
-              <input type="checkbox" checked={sheet.layout.allowRotation} onChange={(event) => updateSheet((current) => ({
+              <input type="checkbox" title="Allow artwork to rotate by 90 degrees to improve sheet fit" checked={sheet.layout.allowRotation} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 layout: { ...current.layout, allowRotation: event.target.checked },
               }))} />
@@ -1829,7 +1841,7 @@ export function ImpositionBuilder({
             </button>
           </fieldset>
           <details className="imposition-settings-group">
-            <summary>
+            <summary title="Show or hide cutting mark settings">
               <span>Cut marks</span>
               <span className={`imposition-summary-meta${sheet.cutMarks.enabled ? ' is-on' : ''}`}>{sheet.cutMarks.enabled ? 'On' : 'Off'}</span>
             </summary>
@@ -1837,14 +1849,14 @@ export function ImpositionBuilder({
             <fieldset>
             <legend>Mark options</legend>
             <label className="imposition-checkbox">
-              <input type="checkbox" checked={sheet.cutMarks.enabled} onChange={(event) => updateSheet((current) => ({
+              <input type="checkbox" title="Turn cut marks on or off for the active sheet" checked={sheet.cutMarks.enabled} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 cutMarks: { ...current.cutMarks, enabled: event.target.checked },
               }))} />
               Enable cut marks
             </label>
             <label className="imposition-checkbox">
-              <input type="checkbox" checked={sheet.cutMarks.showInWorkspace} onChange={(event) => updateSheet((current) => ({
+              <input type="checkbox" title="Show or hide cut marks in the workspace preview" checked={sheet.cutMarks.showInWorkspace} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 cutMarks: { ...current.cutMarks, showInWorkspace: event.target.checked },
               }))} />
@@ -1863,7 +1875,7 @@ export function ImpositionBuilder({
               ['customGuides', 'Custom guides'],
             ] as const).map(([key, label]) => (
               <label className="imposition-checkbox" key={key}>
-                <input type="checkbox" checked={sheet.cutMarks[key]} onChange={(event) => updateSheet((current) => ({
+                <input type="checkbox" title={`Show or hide ${label.toLowerCase()}`} checked={sheet.cutMarks[key]} onChange={(event) => updateSheet((current) => ({
                   ...current,
                   cutMarks: { ...current.cutMarks, [key]: event.target.checked },
                 }))} />
@@ -1880,6 +1892,7 @@ export function ImpositionBuilder({
               <label className="imposition-margin-field" key={key}>
                 {label} (mm)
                 <NumericInput
+                  title={`Set the cut mark ${label.toLowerCase()} in millimetres`}
                   min="0"
                   step={key === 'lineWidthMm' ? '0.01' : '0.1'}
                   value={key === 'lineWidthMm' ? sheet.cutMarks.lineWidthMm.toFixed(2) : formatMeasurement(sheet.cutMarks[key], 'mm')}
@@ -1899,14 +1912,14 @@ export function ImpositionBuilder({
             ))}
             <label>
               Mark colour
-              <input type="color" value={sheet.cutMarks.color} onChange={(event) => updateSheet((current) => ({
+              <input type="color" title="Choose the colour used for cut marks" value={sheet.cutMarks.color} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 cutMarks: { ...current.cutMarks, color: event.target.value },
               }))} />
             </label>
             <label>
               Mark style
-              <select value={sheet.cutMarks.style} onChange={(event) => updateSheet((current) => ({
+              <select title="Choose whether cut marks are solid, dashed, or dotted" value={sheet.cutMarks.style} onChange={(event) => updateSheet((current) => ({
                 ...current,
                 cutMarks: { ...current.cutMarks, style: event.target.value as typeof current.cutMarks.style },
               }))}>
@@ -1916,7 +1929,7 @@ export function ImpositionBuilder({
               </select>
             </label>
             <label className="imposition-checkbox">
-              <input type="checkbox" checked={document.export.includeCutMarks} onChange={(event) => commitDocument({
+              <input type="checkbox" title="Include cut marks in exported PDF files" checked={document.export.includeCutMarks} onChange={(event) => commitDocument({
                 ...document,
                 export: { ...document.export, includeCutMarks: event.target.checked },
               })} />
@@ -1943,10 +1956,11 @@ export function ImpositionBuilder({
               </ul>
             ) : <p className="preflight-pass">No preflight problems were found.</p>}
             <div className="imposition-modal-actions">
-              <button type="button" onClick={() => setPreflightIssues(null)} disabled={exporting}>Close</button>
+              <button type="button" title="Close the preflight report" onClick={() => setPreflightIssues(null)} disabled={exporting}>Close</button>
               <button
                 type="button"
                 className="primary"
+                title="Export the sheet as a print-ready PDF"
                 onClick={() => void exportPrintReadyPdf()}
                 disabled={exporting || preflightIssues.some((issue) => issue.severity === 'error')}
               >
