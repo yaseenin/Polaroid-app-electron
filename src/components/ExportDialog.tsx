@@ -3,7 +3,11 @@ import {
   PAPER_SIZES,
   PRESETS,
   buildSheetLayout,
+  drawExportJobCard,
+  getSheetCell,
+  getSheetGridDimensions,
   renderSheet,
+  type ExportFillOrder,
   type PaperSizeKey,
   type PresetKey,
 } from '../engine/polaroidEngine'
@@ -22,6 +26,10 @@ type ExportDialogProps = {
   onPageCountChange: (value: number) => void
   autoRotate: boolean
   onAutoRotateChange: (value: boolean) => void
+  fillOrder: ExportFillOrder
+  onFillOrderChange: (value: ExportFillOrder) => void
+  includeJobCard: boolean
+  onIncludeJobCardChange: (value: boolean) => void
   fillBlur: boolean
   onFillBlurChange: (value: boolean) => void
   gridOffsetX: number
@@ -51,6 +59,10 @@ export function ExportDialog({
   onPageCountChange,
   autoRotate,
   onAutoRotateChange,
+  fillOrder,
+  onFillOrderChange,
+  includeJobCard,
+  onIncludeJobCardChange,
   fillBlur,
   onFillBlurChange,
   gridOffsetX,
@@ -71,6 +83,7 @@ export function ExportDialog({
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
   const [sheetSize, setSheetSize] = useState({ width: 0, height: 0 })
   const [previewZoom, setPreviewZoom] = useState(1)
+  const [processedAt] = useState(() => new Date())
 
   // Keeps the latest offset values so auto-repeat intervals never read stale state.
   const offsetRef = useRef({ x: gridOffsetX, y: gridOffsetY })
@@ -116,9 +129,9 @@ export function ExportDialog({
   }, [])
 
   const maxImagesPerPage = useMemo(() => {
-    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, orientation)
+    const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, orientation, includeJobCard)
     return layout.cols * layout.rows
-  }, [preset, paperSize, orientation])
+  }, [preset, paperSize, orientation, includeJobCard])
 
   const totalPages = Math.max(1, Math.ceil(photos.length / maxImagesPerPage))
   const currentPage = Math.min(previewPage, totalPages - 1)
@@ -155,7 +168,7 @@ export function ExportDialog({
 
         const offset = { offsetX: gridOffsetX, offsetY: gridOffsetY }
         if (format !== 'pdf') {
-          const sheet = await renderSheet(cards, preset, NEUTRAL_SETTINGS, paperSize, autoRotate, offset, orientation)
+          const sheet = await renderSheet(cards, preset, NEUTRAL_SETTINGS, paperSize, autoRotate, offset, orientation, processedAt, fillOrder, includeJobCard)
           if (cancelled) return
           canvas.width = sheet.width
           canvas.height = sheet.height
@@ -166,9 +179,8 @@ export function ExportDialog({
           return
         }
 
-        const layout = buildSheetLayout(base, cards.length, paperSize, offset, orientation)
-        const usedCols = Math.max(1, Math.ceil(cards.length / layout.rows))
-        const usedRows = usedCols > 1 ? layout.rows : Math.max(1, cards.length)
+        const layout = buildSheetLayout(base, cards.length, paperSize, offset, orientation, includeJobCard)
+        const { cols: usedCols, rows: usedRows } = getSheetGridDimensions(cards.length, layout, fillOrder)
         canvas.width = Math.round(layout.sheetW)
         canvas.height = Math.round(layout.sheetH)
         const context = canvas.getContext('2d')
@@ -177,8 +189,7 @@ export function ExportDialog({
         context.fillRect(0, 0, canvas.width, canvas.height)
 
         cards.forEach((card, index) => {
-          const col = Math.floor(index / layout.rows)
-          const row = index % layout.rows
+          const { col, row } = getSheetCell(index, layout, fillOrder)
           context.drawImage(
             card,
             layout.marginX + col * base.frameW + base.offsetX,
@@ -210,6 +221,9 @@ export function ExportDialog({
           context.lineTo(layout.marginX + gridW + layout.markLength, y)
           context.stroke()
         }
+        if (includeJobCard) {
+          drawExportJobCard(context, preset, layout, usedRows, processedAt)
+        }
         setSheetSize({ width: canvas.width, height: canvas.height })
       } catch {
         if (!cancelled) onPreviewError('Unable to build the export preview.')
@@ -234,6 +248,9 @@ export function ExportDialog({
     format,
     gridOffsetX,
     gridOffsetY,
+    processedAt,
+    fillOrder,
+    includeJobCard,
   ])
 
   return (
@@ -277,6 +294,14 @@ export function ExportDialog({
               </div>
 
               <div className="template-row compact">
+                <label>Fill order</label>
+                <select title="Choose photo arrangement order" value={fillOrder} onChange={(event) => onFillOrderChange(event.target.value as ExportFillOrder)}>
+                  <option value="columns-first">Column first (top to bottom)</option>
+                  <option value="rows-first">Row first (left to right)</option>
+                </select>
+              </div>
+
+              <div className="template-row compact">
                 <label>Pages</label>
                 <input
                   title="Number of pages"
@@ -291,6 +316,17 @@ export function ExportDialog({
               <div className="toggle-row">
                 <label>Auto rotation</label>
                 <input title="Auto rotate images" type="checkbox" checked={autoRotate} onChange={(event) => onAutoRotateChange(event.target.checked)} />
+              </div>
+
+              <div className="toggle-row job-card-toggle">
+                <label>Include job card</label>
+                <input
+                  type="checkbox"
+                  aria-label="Include job card"
+                  title="Include the processed date and Polaroid type on the export"
+                  checked={includeJobCard}
+                  onChange={(event) => onIncludeJobCardChange(event.target.checked)}
+                />
               </div>
 
               <div className="toggle-row">
@@ -393,6 +429,8 @@ export function ExportDialog({
               <span className="export-preview-meta">Pages: {pageCount}</span>
               <span className="export-preview-divider">•</span>
               <span className="export-preview-meta">Orientation: {orientation}</span>
+              <span className="export-preview-divider">•</span>
+              <span className="export-preview-meta">Fill order: {fillOrder === 'columns-first' ? 'Column first' : 'Row first'}</span>
               <span className="export-preview-divider">•</span>
               <span className="export-preview-meta">Auto rotate: {autoRotate ? 'On' : 'Off'}</span>
               <div className="export-preview-zoom" aria-label="Preview zoom controls">

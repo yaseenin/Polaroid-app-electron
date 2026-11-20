@@ -1,4 +1,4 @@
-import type { AdjustmentSettings, PaperSizeKey, PresetKey } from './engine/polaroidEngine'
+import type { AdjustmentSettings, ExportFillOrder, PaperSizeKey, PresetKey } from './engine/polaroidEngine'
 
 export type Photo = {
   id: number
@@ -70,6 +70,8 @@ export type SavedProject = {
   exportPageCount: number
   exportOrientation: ExportOrientation
   exportAutoRotate: boolean
+  exportFillOrder?: ExportFillOrder
+  exportJobCard?: boolean
   /** Manual grid offset applied on top of the centered layout (in sheet pixels). */
   exportGridOffsetX: number
   exportGridOffsetY: number

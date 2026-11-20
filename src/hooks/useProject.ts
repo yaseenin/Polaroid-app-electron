@@ -1,5 +1,5 @@
 import { useCallback, useRef, type ChangeEvent } from 'react'
-import type { AdjustmentSettings, PaperSizeKey, PresetKey } from '../engine/polaroidEngine'
+import type { AdjustmentSettings, ExportFillOrder, PaperSizeKey, PresetKey } from '../engine/polaroidEngine'
 import { getBridge, getFolderOf, toAppFileUrl } from '../lib/bridge'
 import { NEUTRAL_SETTINGS } from '../lib/editorConstants'
 import type { EmbedMode, ProjectFile, SavedPhoto } from '../lib/projectTypes'
@@ -17,6 +17,8 @@ export type ProjectSnapshot = {
   exportPageCount: number
   exportOrientation: ExportOrientation
   exportAutoRotate: boolean
+  exportFillOrder: ExportFillOrder
+  exportJobCard: boolean
   exportGridOffsetX: number
   exportGridOffsetY: number
   fillBlur: boolean
@@ -95,6 +97,8 @@ export function useProject(params: Params) {
         exportPageCount: snapshot.exportPageCount,
         exportOrientation: snapshot.exportOrientation,
         exportAutoRotate: snapshot.exportAutoRotate,
+        exportFillOrder: snapshot.exportFillOrder,
+        exportJobCard: snapshot.exportJobCard,
         exportGridOffsetX: snapshot.exportGridOffsetX,
         exportGridOffsetY: snapshot.exportGridOffsetY,
         fillBlur: snapshot.fillBlur,

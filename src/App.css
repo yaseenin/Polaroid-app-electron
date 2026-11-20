@@ -1306,6 +1306,43 @@ button {
   accent-color: var(--accent);
 }
 
+.job-card-toggle input[type='checkbox'] {
+  appearance: none;
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--border);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.job-card-toggle input[type='checkbox']::before {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  content: '';
+  transition: transform 120ms ease;
+}
+
+.job-card-toggle input[type='checkbox']:checked {
+  background: var(--accent);
+}
+
+.job-card-toggle input[type='checkbox']:checked::before {
+  transform: translateX(14px);
+}
+
+.job-card-toggle input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .export-preview-panel {
   display: flex;
   flex-direction: column;

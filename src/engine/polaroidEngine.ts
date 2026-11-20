@@ -2,6 +2,7 @@ import type { ExportOrientation } from '../types'
 
 export type PresetKey = 'mini' | 'instax-max' | 'polaroid-600'
 export type PaperSizeKey = 'A4' | '13x19' | '13x9.5'
+export type ExportFillOrder = 'columns-first' | 'rows-first'
 
 export type AdjustmentSettings = {
   exposure: number
@@ -114,6 +115,73 @@ export const PAPER_SIZES: Record<PaperSizeKey, { label: string; width: number; h
   '13x9.5': { label: '13x9.5', width: 3900, height: 2850 },
 }
 
+const JOB_CARD_WIDTH = 560
+const JOB_CARD_HEIGHT = 132
+const JOB_CARD_GAP = 16
+const JOB_CARD_PADDING = 16
+
+export type ExportJobCard = {
+  x: number
+  y: number
+  width: number
+  height: number
+  lines: Array<{ text: string; x: number; y: number; fontSize: number; bold: boolean }>
+}
+
+function formatProcessedDate(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+export function createExportJobCard(
+  presetKey: PresetKey,
+  layout: { sheetW: number; marginY: number; markLength: number },
+  usedRows: number,
+  processedAt: Date,
+): ExportJobCard {
+  const x = (layout.sheetW - JOB_CARD_WIDTH) / 2
+  const y = layout.marginY + usedRows * PRESETS[presetKey].frameH + layout.markLength + JOB_CARD_GAP
+  const textX = x + JOB_CARD_PADDING
+
+  return {
+    x,
+    y,
+    width: JOB_CARD_WIDTH,
+    height: JOB_CARD_HEIGHT,
+    lines: [
+      { text: 'JOB CARD', x: textX, y: y + 42, fontSize: 32, bold: true },
+      { text: `Processed: ${formatProcessedDate(processedAt)}`, x: textX, y: y + 76, fontSize: 26, bold: false },
+      { text: `Polaroid type: ${PRESETS[presetKey].label}`, x: textX, y: y + 108, fontSize: 26, bold: false },
+    ],
+  }
+}
+
+export function drawExportJobCard(
+  context: CanvasRenderingContext2D,
+  presetKey: PresetKey,
+  layout: { sheetW: number; marginY: number; markLength: number },
+  usedRows: number,
+  processedAt: Date,
+): void {
+  const card = createExportJobCard(presetKey, layout, usedRows, processedAt)
+  context.save()
+  context.fillStyle = '#ffffff'
+  context.strokeStyle = '#000000'
+  context.lineWidth = 2
+  context.fillRect(card.x, card.y, card.width, card.height)
+  context.strokeRect(card.x, card.y, card.width, card.height)
+  context.fillStyle = '#000000'
+  context.textAlign = 'left'
+  context.textBaseline = 'alphabetic'
+  for (const line of card.lines) {
+    context.font = `${line.bold ? 'bold ' : ''}${line.fontSize}px Arial`
+    context.fillText(line.text, line.x, line.y)
+  }
+  context.restore()
+}
+
 export function buildAdjustmentOperations(settings: AdjustmentSettings): AdjustmentOperation[] {
   const operations: AdjustmentOperation[] = []
 
@@ -160,12 +228,43 @@ export interface GridOffset {
   offsetY: number
 }
 
+export function getSheetGridDimensions(
+  imageCount: number,
+  layout: { cols: number; rows: number },
+  fillOrder: ExportFillOrder,
+): { cols: number; rows: number } {
+  if (fillOrder === 'rows-first') {
+    const rows = Math.max(1, Math.ceil(imageCount / layout.cols))
+    return {
+      cols: rows > 1 ? layout.cols : Math.max(1, imageCount),
+      rows,
+    }
+  }
+
+  const cols = Math.max(1, Math.ceil(imageCount / layout.rows))
+  return {
+    cols,
+    rows: cols > 1 ? layout.rows : Math.max(1, imageCount),
+  }
+}
+
+export function getSheetCell(
+  index: number,
+  layout: { cols: number; rows: number },
+  fillOrder: ExportFillOrder,
+): { col: number; row: number } {
+  return fillOrder === 'rows-first'
+    ? { col: index % layout.cols, row: Math.floor(index / layout.cols) }
+    : { col: Math.floor(index / layout.rows), row: index % layout.rows }
+}
+
 export function buildSheetLayout(
   preset: PresetDefinition,
   imageCount: number,
   paperSize: PaperSizeKey = 'A4',
   offset: GridOffset = { offsetX: 0, offsetY: 0 },
   orientation?: ExportOrientation,
+  includeJobCard = false,
 ): {
   cols: number
   rows: number
@@ -239,14 +338,21 @@ export function buildSheetLayout(
 
   const gridW = cols * preset.frameW
   const gridH = rows * preset.frameH
+  const markLength = 40
+  const minimumMarginY = includeJobCard
+    ? markLength + JOB_CARD_GAP + JOB_CARD_HEIGHT + JOB_CARD_PADDING
+    : 40
   let resolvedSheetW = Math.max(sheetW, gridW + 80)
-  let resolvedSheetH = Math.max(sheetH, gridH + 80)
+  let resolvedSheetH = Math.max(
+    sheetH,
+    gridH + 80,
+    gridH + 2 * (minimumMarginY + Math.max(0, offset.offsetY)),
+  )
   if (orientation === 'portrait' && resolvedSheetW >= resolvedSheetH) {
     resolvedSheetH = resolvedSheetW + 1
   } else if (orientation === 'landscape' && resolvedSheetH >= resolvedSheetW) {
     resolvedSheetW = resolvedSheetH + 1
   }
-  const markLength = 40
 
   return {
     cols,
@@ -674,9 +780,12 @@ export async function renderSheet(
   autoRotate = false,
   offset: GridOffset = { offsetX: 0, offsetY: 0 },
   orientation?: ExportOrientation,
+  processedAt?: Date,
+  fillOrder: ExportFillOrder = 'columns-first',
+  includeJobCard = processedAt !== undefined,
 ): Promise<HTMLCanvasElement> {
   const preset = PRESETS[presetKey]
-  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize, offset, orientation)
+  const layout = buildSheetLayout(preset, sourceImages.length || 1, paperSize, offset, orientation, includeJobCard)
   const sheetCanvas = document.createElement('canvas')
   sheetCanvas.width = Math.round(layout.sheetW)
   sheetCanvas.height = Math.round(layout.sheetH)
@@ -694,12 +803,10 @@ export async function renderSheet(
     sourceImages.map((image) => renderPolaroidCard(image, presetKey, settings, autoRotate)),
   )
 
-  const usedCols = Math.max(1, Math.ceil(cards.length / layout.rows))
-  const usedRows = usedCols > 1 ? layout.rows : Math.max(1, cards.length)
+  const { cols: usedCols, rows: usedRows } = getSheetGridDimensions(cards.length, layout, fillOrder)
 
   for (let index = 0; index < cards.length; index += 1) {
-    const col = Math.floor(index / layout.rows)
-    const row = index % layout.rows
+    const { col, row } = getSheetCell(index, layout, fillOrder)
     const x = layout.marginX + col * preset.frameW
     const y = layout.marginY + row * preset.frameH
 
@@ -729,6 +836,10 @@ export async function renderSheet(
     context.moveTo(layout.marginX + gridW, y)
     context.lineTo(layout.marginX + gridW + layout.markLength, y)
     context.stroke()
+  }
+
+  if (includeJobCard && processedAt) {
+    drawExportJobCard(context, presetKey, layout, usedRows, processedAt)
   }
 
   return sheetCanvas

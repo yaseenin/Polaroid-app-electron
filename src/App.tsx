@@ -13,8 +13,12 @@ import {
   PRESETS,
   buildAdjustmentOperations,
   buildSheetLayout,
+  createExportJobCard,
+  getSheetCell,
+  getSheetGridDimensions,
   renderSheet,
   type AdjustmentSettings,
+  type ExportFillOrder,
   type PaperSizeKey,
   type PresetKey,
 } from './engine/polaroidEngine'
@@ -127,21 +131,22 @@ async function buildSheetPages(
   offset: { offsetX: number; offsetY: number },
   pageCapacity: number,
   orientation: ExportOrientation,
+  processedAt: Date,
+  fillOrder: ExportFillOrder,
+  includeJobCard: boolean,
 ): Promise<SheetPagePayload[]> {
   const preset = PRESETS[presetKey]
   const pages: SheetPagePayload[] = []
 
   for (let start = 0; start < images.length; start += pageCapacity) {
     const pageImages = images.slice(start, start + pageCapacity)
-    const layout = buildSheetLayout(preset, pageImages.length, paperSize, offset, orientation)
-    const usedCols = Math.max(1, Math.ceil(pageImages.length / layout.rows))
-    const usedRows = usedCols > 1 ? layout.rows : Math.max(1, pageImages.length)
+    const layout = buildSheetLayout(preset, pageImages.length, paperSize, offset, orientation, includeJobCard)
+    const { cols: usedCols, rows: usedRows } = getSheetGridDimensions(pageImages.length, layout, fillOrder)
     const gridW = usedCols * preset.frameW
     const gridH = usedRows * preset.frameH
     const placedImages = await Promise.all(
       pageImages.map(async (image, index) => {
-        const col = Math.floor(index / layout.rows)
-        const row = index % layout.rows
+        const { col, row } = getSheetCell(index, layout, fillOrder)
         return {
           buffer: await canvasToBytes(image, 'image/jpeg', 0.95),
           x: layout.marginX + col * preset.frameW + preset.offsetX,
@@ -168,7 +173,34 @@ async function buildSheetPages(
       )
     }
 
-    pages.push({ width: layout.sheetW, height: layout.sheetH, images: placedImages, lines })
+    let text: SheetPagePayload['text']
+    if (includeJobCard) {
+      const jobCard = createExportJobCard(presetKey, layout, usedRows, processedAt)
+      lines.push(
+        { x1: jobCard.x, y1: jobCard.y, x2: jobCard.x + jobCard.width, y2: jobCard.y, width: 2 },
+        { x1: jobCard.x + jobCard.width, y1: jobCard.y, x2: jobCard.x + jobCard.width, y2: jobCard.y + jobCard.height, width: 2 },
+        { x1: jobCard.x + jobCard.width, y1: jobCard.y + jobCard.height, x2: jobCard.x, y2: jobCard.y + jobCard.height, width: 2 },
+        { x1: jobCard.x, y1: jobCard.y + jobCard.height, x2: jobCard.x, y2: jobCard.y, width: 2 },
+      )
+      text = jobCard.lines.map((line) => ({
+        text: line.text,
+        x: line.x,
+        y: line.y,
+        fontSize: line.fontSize,
+        color: '#000000',
+        rotationDeg: 0,
+        centerX: line.x,
+        centerY: line.y,
+      }))
+    }
+
+    pages.push({
+      width: layout.sheetW,
+      height: layout.sheetH,
+      images: placedImages,
+      lines,
+      ...(text ? { text } : {}),
+    })
   }
 
   return pages
@@ -195,6 +227,8 @@ function App() {
   const [exportPageCount, setExportPageCount] = useState(1)
   const [exportOrientation, setExportOrientation] = useState<ExportOrientation>('portrait')
   const [exportAutoRotate, setExportAutoRotate] = useState(true)
+  const [exportFillOrder, setExportFillOrder] = useState<ExportFillOrder>('columns-first')
+  const [exportJobCard, setExportJobCard] = useState(true)
   const [fillBlur, setFillBlur] = useState(false)
   const [exportGridOffsetX, setExportGridOffsetX] = useState(0)
   const [exportGridOffsetY, setExportGridOffsetY] = useState(0)
@@ -750,6 +784,8 @@ function App() {
     setExportPageCount(project.exportPageCount ?? 1)
     setExportOrientation(project.exportOrientation ?? 'portrait')
     setExportAutoRotate(project.exportAutoRotate ?? true)
+    setExportFillOrder(project.exportFillOrder ?? 'columns-first')
+    setExportJobCard(project.exportJobCard ?? true)
     setFillBlur(project.fillBlur ?? false)
     setExportGridOffsetX(project.exportGridOffsetX ?? 0)
     setExportGridOffsetY(project.exportGridOffsetY ?? 0)
@@ -783,6 +819,8 @@ function App() {
       exportPageCount,
       exportOrientation,
       exportAutoRotate,
+      exportFillOrder,
+      exportJobCard,
       exportGridOffsetX,
       exportGridOffsetY,
       fillBlur,
@@ -856,6 +894,8 @@ function App() {
     exportPageCount,
     exportOrientation,
     exportAutoRotate,
+    exportFillOrder,
+    exportJobCard,
     exportGridOffsetX,
     exportGridOffsetY,
     fillBlur,
@@ -1161,13 +1201,14 @@ function App() {
     setStatus('Processing images and building export sheet…')
 
     try {
+      const processedAt = new Date()
       const { photoW, photoH } = PRESETS[preset]
       const images: HTMLCanvasElement[] = []
       for (const photo of photos) {
         images.push(await buildCard(photo, photoW, photoH, { preview: false }))
       }
 
-      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation)
+      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation, exportJobCard)
       const maxImagesPerPage = layout.cols * layout.rows
       // PDF pages use JPEG: embedding is a straight copy (PNG must be decoded) and the file stays far smaller.
       const mime = exportFormat === 'png' ? 'image/png' : exportFormat === 'webp' ? 'image/webp' : 'image/jpeg'
@@ -1178,7 +1219,7 @@ function App() {
         const pdfPages = await buildSheetPages(images, preset, paperSize, {
           offsetX: exportGridOffsetX,
           offsetY: exportGridOffsetY,
-        }, maxImagesPerPage, exportOrientation)
+        }, maxImagesPerPage, exportOrientation, processedAt, exportFillOrder, exportJobCard)
 
         const result = await bridge.saveExport({
           mime: 'image/jpeg',
@@ -1205,7 +1246,7 @@ function App() {
         const sheet = await renderSheet(images.slice(i, i + maxImagesPerPage), preset, NEUTRAL_SETTINGS, paperSize, exportAutoRotate, {
           offsetX: exportGridOffsetX,
           offsetY: exportGridOffsetY,
-        }, exportOrientation)
+        }, exportOrientation, processedAt, exportFillOrder, exportJobCard)
         buffers.push(await canvasToBytes(sheet, mime, 0.95))
       }
 
@@ -1264,17 +1305,18 @@ function App() {
     setStatus('Preparing print preview…')
 
     try {
+      const processedAt = new Date()
       const { photoW, photoH } = PRESETS[preset]
       const images: HTMLCanvasElement[] = []
       for (const photo of photos) {
         images.push(await buildCard(photo, photoW, photoH, { preview: false }))
       }
 
-      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation)
+      const layout = buildSheetLayout(PRESETS[preset], 1, paperSize, undefined, exportOrientation, exportJobCard)
       const pages = await buildSheetPages(images, preset, paperSize, {
         offsetX: exportGridOffsetX,
         offsetY: exportGridOffsetY,
-      }, layout.cols * layout.rows, exportOrientation)
+      }, layout.cols * layout.rows, exportOrientation, processedAt, exportFillOrder, exportJobCard)
       const result = await bridge.openPrintPreview({ pages, dpi: 300 })
       if (!result.ok) throw new Error(result.error ?? 'Unable to open print preview.')
 
@@ -1307,7 +1349,6 @@ function App() {
     const inputType = (target as HTMLInputElement | null)?.type
     const isRange = tag === 'INPUT' && inputType === 'range'
     const isTyping = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !isRange && inputType !== 'checkbox')
-    const isButtonTarget = target instanceof Element && target.closest('button') !== null
     const mod = event.ctrlKey || event.metaKey
     const key = event.key.toLowerCase()
 
@@ -1361,10 +1402,8 @@ function App() {
       cropRect &&
       !cropContextMenu &&
       !mod &&
-      !isTyping &&
-      !isRange &&
+      !event.repeat &&
       !showExportDialog &&
-      !isButtonTarget &&
       (cropAspect !== 'Custom' || customAspectValid)
     ) {
       event.preventDefault()
@@ -1946,6 +1985,10 @@ function App() {
           onPageCountChange={setExportPageCount}
           autoRotate={exportAutoRotate}
           onAutoRotateChange={setExportAutoRotate}
+          fillOrder={exportFillOrder}
+          onFillOrderChange={setExportFillOrder}
+          includeJobCard={exportJobCard}
+          onIncludeJobCardChange={setExportJobCard}
           fillBlur={fillBlur}
           onFillBlurChange={setFillBlur}
           gridOffsetX={exportGridOffsetX}

@@ -11,9 +11,9 @@ export function getAspectValue(aspect: CropAspect, customAspectRatio: number | n
     case 'Square':
       return 1
     case 'Mini':
-      return 68 / 91
+      return 11 / 14
     case 'Wide':
-      return 1.234
+      return 195 / 122
     case 'Custom':
       return customAspectRatio && Number.isFinite(customAspectRatio) && customAspectRatio > 0
         ? customAspectRatio
